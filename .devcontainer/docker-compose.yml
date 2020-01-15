@@ -1,0 +1,29 @@
+version: "3.7"
+
+services:
+  rust:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ..:/workspace:cached
+    command: /bin/sh -c "while sleep 1000; do :; done"
+
+  timescaledb:
+    image: timescale/timescaledb:latest-pg11
+    restart: unless-stopped
+    volumes:
+      - data:/var/lib/postgresql/data
+    ports:
+      - 5432:5432
+    environment:
+      POSTGRES_PASSWORD: test123
+
+  adminer:
+    image: adminer
+    restart: unless-stopped
+    ports:
+      - 8080:8080
+
+volumes:
+  data:
