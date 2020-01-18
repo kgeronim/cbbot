@@ -1,6 +1,10 @@
 use cbpro::{
     websocket::{Channels, WebSocketFeed, WEBSOCKET_FEED_URL},
-    client::{PublicClient, AuthenticatedClient, MAIN_URL}
+    client::{
+        PublicClient, 
+        AuthenticatedClient, 
+        MAIN_URL
+    }
 };
 use futures::StreamExt;
 use tokio::sync::mpsc;
@@ -214,7 +218,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             
-            if let Err(_) = price_tx.send((time, close)).await {
+            if let Err(_) = price_tx.send((time, close, "old")).await {
                 println!("close price receiver dropped");
                 return;
             }
@@ -265,7 +269,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     
-                    if let Err(_) = price_tx.send((bucket_time, close)).await {
+                    if let Err(_) = price_tx.send((bucket_time, close, "new")).await {
                         println!("close price receiver dropped");
                         return;
                     }
@@ -392,7 +396,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut prev_ema: Option<f64> = None;
         let mut window: VecDeque<f64> = VecDeque::with_capacity(size);
 
-        while let Some((time, price)) = price_rx.recv().await {
+        while let Some((time, price, status)) = price_rx.recv().await {
             if count == size - 1 {
                 window.push_back(price);
 
@@ -411,7 +415,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let rsi = rsi_rx.recv().await;
                 if let Some((rsi, gains_ema, losses_ema)) = rsi {
                     
-                    if let Err(_) = maker_tx.send(rsi).await {
+                    if let Err(_) = maker_tx.send((price, rsi, status)).await {
                         println!("ema receiver dropped");
                         return;
                     }
@@ -439,13 +443,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     });
 
-    /// trading starts here
+    // trading starts here
     tokio::spawn(async move {
-        let client = AuthenticatedClient::new("key", "pass", "secret", MAIN_URL);
+        let secret = "M0UEpXjC2kqfiyPgO4n+kyQpMZGVxZln/CH6qrz+OQBVZexjHFqsW3v3vyzcia5fVJGz7GlBcmu2mv+1fTD14A==";
+        let pass = "nu6ck2twnd";
+        let key = "f7cbb7dc1096f23f471693406b1e7007";
 
-        while let Some(Some(rsi)) = maker_rx.recv().await {
-            
+        let client = AuthenticatedClient::new(key, pass, secret, MAIN_URL);
+
+        while let Some((price, rsi, status)) = maker_rx.recv().await {
+            if let (Some(rsi), "new") = (rsi, status) {
+                if rsi < 31.0 {
+
+                    let size = 100.0 / price;
+                    let response = client
+                        .place_limit_order("BTC-USD", "buy", price, size)
+                        .time_in_force("IOC")
+                        .json()
+                        .await;
+
+                    match response {
+                        Ok(res) => println!("{}", serde_json::to_string_pretty(&res).unwrap()),
+                        Err(e) => {
+                            eprintln!("{:?}", e);
+                            return;
+                        }
+                    }
+                }
+            }
         }
+
     }).await?;
 
     Ok(())
