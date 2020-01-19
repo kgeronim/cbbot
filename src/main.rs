@@ -12,6 +12,7 @@ use tokio_postgres::{types::ToSql, NoTls};
 use chrono::{DateTime, Timelike, Utc, NaiveDateTime};
 use std::sync::Arc;
 use std::collections::VecDeque;
+use std::iter::Iterator;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -22,15 +23,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Arc::new(client);
     let ticker_client = Arc::clone(&client);
     let candle_client = Arc::clone(&client);
-    let sma_client = Arc::clone(&client);
+    let ma_client = Arc::clone(&client);
 
     let (mut ticker_tx, mut ticker_rx) = mpsc::channel(1000);
     let (mut price_tx, mut price_rx) = mpsc::channel(1000);
-    let (mut gains_tx, mut gains_rx) = mpsc::channel(1000);
-    let (mut losses_tx, mut losses_rx) = mpsc::channel(1000);
-    let (mut ema_tx, mut ema_rx) = mpsc::channel(1000);
-    let (mut rsi_tx, mut rsi_rx) = mpsc::channel(1000);
-    let (mut maker_tx, mut maker_rx) = mpsc::channel(1000);
 
     tokio::spawn(async move {
         if let Err(e) = connection.await {
@@ -195,32 +191,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let volume = rate[5].as_f64().unwrap();
             let time = DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp(time, 0), Utc);
 
-            
             if (close - open).is_sign_positive() {
-                if let Err(_) = gains_tx.send(close).await {
-                    println!("close price receiver dropped");
-                    return;
-                }
-                
-                if let Err(_) = losses_tx.send(0.).await {
+                if let Err(_) = price_tx.send((time, close, "gain", "old")).await {
                     println!("close price receiver dropped");
                     return;
                 }
             } else {
-                if let Err(_) = losses_tx.send(close).await {
+                if let Err(_) = price_tx.send((time, close, "loss", "old")).await {
                     println!("close price receiver dropped");
                     return;
                 }
-                
-                if let Err(_) = gains_tx.send(0.).await {
-                    println!("close price receiver dropped");
-                    return;
-                }
-            }
-            
-            if let Err(_) = price_tx.send((time, close, "old")).await {
-                println!("close price receiver dropped");
-                return;
             }
 
             if let Err(e) = candle_client.execute(&statement, &[&time, &open, &high, &low, &close, &volume]).await {
@@ -248,30 +228,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     
                     if (close - open).is_sign_positive() {
-                        if let Err(_) = gains_tx.send(close).await {
-                            println!("close price receiver dropped");
-                            return;
-                        }
-                        
-                        if let Err(_) = losses_tx.send(0.).await {
+                        if let Err(_) = price_tx.send((bucket_time, close, "gain", "new")).await {
                             println!("close price receiver dropped");
                             return;
                         }
                     } else {
-                        if let Err(_) = losses_tx.send(close).await {
+                        if let Err(_) = price_tx.send((bucket_time, close, "loss", "new")).await {
                             println!("close price receiver dropped");
                             return;
                         }
-                        
-                        if let Err(_) = gains_tx.send(0.).await {
-                            println!("close price receiver dropped");
-                            return;
-                        }
-                    }
-                    
-                    if let Err(_) = price_tx.send((bucket_time, close, "new")).await {
-                        println!("close price receiver dropped");
-                        return;
                     }
 
                     if let Err(e) = candle_client.execute(&statement, &[&bucket_time, &open, &high, &low, &close, &volume]).await {
@@ -290,101 +255,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     tokio::spawn(async move {
-        let size = 12;
-        let k = 2.0 / ( size as f64 + 1.0 );
-        let mut count = 0;
-        
-        let mut prev_ema: Option<f64> = None;
-        let mut window: VecDeque<f64> = VecDeque::with_capacity(size);
-
-        while let Some(price) = gains_rx.recv().await {
-            if count == size - 1 {
-                window.push_back(price);
-
-                let sum: f64 = window.iter().map(|&x| x).sum();
-                let average = sum / size as f64;
-
-                let current_gains_ema = if let Some(ema) = prev_ema {
-                    let ema = price * k + ema * (1.0 - k);
-                    prev_ema = Some(ema);
-                    Some(ema)
-                } else {
-                    prev_ema = Some(average);
-                    None
-                };
-
-                if let Err(_) = ema_tx.send(current_gains_ema).await {
-                    println!("ema receiver dropped");
-                    return;
-                }
-
-                window.pop_front();
-            } else {
-                window.push_back(price);
-                count += 1;
-            } 
-        }
-
-    });
-
-    tokio::spawn(async move {
-        let size = 12;
-        let k = 2.0 / ( size as f64 + 1.0 );
-        let mut count = 0;
-        
-        let mut prev_ema: Option<f64> = None;
-        let mut window: VecDeque<f64> = VecDeque::with_capacity(size);
-
-        while let Some(price) = losses_rx.recv().await {
-            if count == size - 1 {
-                window.push_back(price);
-
-                let sum: f64 = window.iter().map(|&x| x).sum();
-                let average = sum / size as f64;
-
-                let current_losses_ema = if let Some(ema) = prev_ema {
-                    let ema = price * k + ema * (1.0 - k);
-                    prev_ema = Some(ema);
-                    Some(ema)
-                } else {
-                    prev_ema = Some(average);
-                    None
-                };
-
-                let gains_ema = ema_rx.recv().await;
-
-                match ( gains_ema, current_losses_ema ) {
-                    (Some(Some(gains_ema)), Some(losses_ema)) => {
-                        let rsi = 100.0 - (100.0 / (1.0 + (gains_ema / losses_ema)));
-    
-                        if let Err(_) = rsi_tx.send((Some(rsi), Some(gains_ema), Some(losses_ema))).await {
-                            println!("rsi receiver dropped");
-                            return;
-                        }
-                    },
-                    (Some(None), None) => {
-                        if let Err(_) = rsi_tx.send((None, None, None)).await {
-                            println!("rsi receiver dropped");
-                            return;
-                        }
-                    },
-                    _ => {
-                        println!("ema sender dropped");
-                        return;
-                    }
-                }
-                
-                window.pop_front();
-            } else {
-                window.push_back(price);
-                count += 1;
-            } 
-        }
-
-    });
-
-    tokio::spawn(async move {
-        let statement = sma_client.prepare(
+        let statement = ma_client.prepare(
             "INSERT INTO moving_average (time, close, sma, ema, gains_ema, losses_ema, rsi) 
             VALUES ($1, $2, $3, $4, $5, $6, $7)"
         ).await.unwrap();
@@ -393,58 +264,90 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let k = 2.0 / ( size as f64 + 1.0 );
         let mut count = 0;
         
-        let mut prev_ema: Option<f64> = None;
-        let mut window: VecDeque<f64> = VecDeque::with_capacity(size);
+        let mut prev_ema: [Option<f64>; 3] = [None; 3];
+        let mut window: VecDeque<(f64, &str)> = VecDeque::with_capacity(size);
 
-        while let Some((time, price, status)) = price_rx.recv().await {
+        while let Some((time, price, direction, _)) = price_rx.recv().await {
             if count == size - 1 {
-                window.push_back(price);
+                window.push_back((price, direction));
 
-                let sum: f64 = window.iter().map(|&x| x).sum();
-                let average = sum / size as f64;
+                let sum_all: f64 = window.iter().map(|t| t.0).sum();
+                let sum_gains: f64 = window.iter().map(|t| if t.1 == "gain" {t.0} else {0.}).sum();
+                let sum_losses: f64 = window.iter().map(|t| if t.1 == "loss" {t.0} else {0.}).sum();
+                
+                let mut ema_calc = |index, price, sum| {
+                    if let Some(ema) = prev_ema[index] {
+                        let ema = price * k + ema * (1.0 - k);
+                        prev_ema[index] = Some(ema);
+                        Some(ema)
+                    } else {
+                        prev_ema[index] = Some(sum / size as f64);
+                        None
+                    }
+                };
 
-                let current_ema = if let Some(ema) = prev_ema {
-                    let ema = price * k + ema * (1.0 - k);
-                    prev_ema = Some(ema);
-                    Some(ema)
+                let sma_all = sum_all / size as f64;
+                let ema_all = ema_calc(0, price, sum_all);
+
+                let ema_gains = if let "gain" = direction {
+                   ema_calc(1, price, sum_gains)
                 } else {
-                    prev_ema = Some(average);
+                    ema_calc(1, 0., sum_gains)
+                };
+
+                let ema_losses = if let "loss" = direction {
+                    ema_calc(2, price, sum_losses)
+                 } else {
+                     ema_calc(2, 0., sum_losses)
+                 };
+
+                let rsi = if let (Some(gains), Some(losses)) = (&ema_gains , &ema_losses) {
+                    Some(100.0 - (100.0 / (1.0 + (gains / losses))))
+                } else {
                     None
                 };
 
-                let rsi = rsi_rx.recv().await;
-                if let Some((rsi, gains_ema, losses_ema)) = rsi {
-                    
-                    if let Err(_) = maker_tx.send((price, rsi, status)).await {
-                        println!("ema receiver dropped");
-                        return;
-                    }
-
-                    if let Err(e) = sma_client.execute(&statement, &[&time, &price, &average, &current_ema, &gains_ema, &losses_ema, &rsi]).await {
-                        eprintln!("{:?}", e);
-                        return;
-                    }
-                } else {
-                    println!("rsi sender dropped");
-                    return; 
+                let params: &[&(dyn ToSql + Sync)] = &[
+                    &time, 
+                    &price, 
+                    &sma_all, 
+                    &ema_all, 
+                    &ema_gains, 
+                    &ema_losses, 
+                    &rsi
+                ];
+            
+                if let Err(e) = ma_client.execute(&statement, params).await {
+                    eprintln!("{:?}", e);
+                    return;
                 }
                 
                 window.pop_front();
             } else {
-                window.push_back(price);
+                window.push_back((price, direction));
                 count += 1;
 
-                if let Err(e) = sma_client.execute(&statement, &[&time, &price, &None::<f64>, &None::<f64>, &None::<f64>, &None::<f64>, &None::<f64>]).await {
+                let params: &[&(dyn ToSql + Sync)] = &[
+                    &time, 
+                    &price, 
+                    &None::<f64>, 
+                    &None::<f64>, 
+                    &None::<f64>, 
+                    &None::<f64>, 
+                    &None::<f64>
+                ];
+
+                if let Err(e) = ma_client.execute(&statement, params).await {
                     eprintln!("{:?}", e);
                     return;
                 }
             } 
         }
 
-    });
+    }).await?;
 
     // trading starts here
-    tokio::spawn(async move {
+/*     tokio::spawn(async move {
         let secret = "M0UEpXjC2kqfiyPgO4n+kyQpMZGVxZln/CH6qrz+OQBVZexjHFqsW3v3vyzcia5fVJGz7GlBcmu2mv+1fTD14A==";
         let pass = "nu6ck2twnd";
         let key = "f7cbb7dc1096f23f471693406b1e7007";
@@ -473,7 +376,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-    }).await?;
+    }).await?; */
 
     Ok(())
 }
