@@ -1,4 +1,4 @@
-use futures::{StreamExt, FutureExt};
+use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio_postgres::{types::ToSql, NoTls};
 use chrono::{DateTime, Timelike, Utc, NaiveDateTime};
@@ -360,48 +360,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // trading starts here
     tokio::spawn(async move {
 
-        let get_fills = async {
-            let fills = cb_client2
-                .get_fills(FILL::ProductID("BTC-USD"))
-                .json()
-                .await;
-
-            match fills {
-                Ok(ref fill) => {
-                    println!("{}", serde_json::to_string_pretty(&fill[0]).unwrap());
-                    let side = String::from(fill[0]["side"].as_str().unwrap());
-                    let size = fill[0]["size"]
-                        .as_str()
-                        .unwrap()
-                        .parse::<f64>()
-                        .unwrap();
-    
-                    Ok((side, size))
-                },
-                Err(e) => {
-                    Err(format!("{:?}", e))
-                }
-            }
-        };
-        let get_fills1 = get_fills.shared();
-        let get_fills2 = get_fills1.clone();
-        
-        let (mut side, mut filled_size) = match get_fills1.await {
-            Ok(value) => value,
-            Err(e) => {
-                eprintln!("{:?}", e);
-                return;
-            }
-        };
-
-        let (mut side, mut filled_size) = match get_fills2.await {
-            Ok(value) => value,
-            Err(e) => {
-                eprintln!("{:?}", e);
-                return;
-            }
-        };
-
         while let Some(status) = rsi_rx.recv().await {
             if let (Some(rsi), ("new", bid, ask)) = status {
                 let holds = cb_client2
@@ -421,6 +379,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
 
                 if holds.as_array().unwrap().is_empty() {
+
+                    let fills = cb_client2
+                    .get_fills(FILL::ProductID("BTC-USD"))
+                    .json()
+                    .await;
+        
+                    let (side, filled_size) = match fills {
+                        Ok(ref fill) => {
+                            println!("{}", serde_json::to_string_pretty(&fill[0]).unwrap());
+                            let side = String::from(fill[0]["side"].as_str().unwrap());
+                            let size = fill[0]["size"]
+                                .as_str()
+                                .unwrap()
+                                .parse::<f64>()
+                                .unwrap();
+            
+                            (side, size)
+                        },
+                        Err(e) => {
+                            eprintln!("{:?}", e);
+                            return;
+                        }
+                    };
+
                     if rsi < 75.0 && side == "sell" {
                         let size = 500.0 / ask;
                         let dp = 10.0_f64.powi(8);
@@ -447,8 +429,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
                         match order {
                             Ok(ref ord) => {
-                                side = String::from(ord["side"].as_str().unwrap());
-                                filled_size = size;
                                 println!("{}", serde_json::to_string_pretty(&ord).unwrap());
                                 println!("{}", rsi);
                             }
@@ -478,7 +458,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
                         match order {
                             Ok(ref ord) => {
-                                side = String::from(ord["side"].as_str().unwrap());
                                 println!("{}", serde_json::to_string_pretty(&ord).unwrap());
                                 println!("{}", rsi);
                             }
