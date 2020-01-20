@@ -1,32 +1,40 @@
-use cbpro::{
-    websocket::{Channels, WebSocketFeed, WEBSOCKET_FEED_URL},
-    client::{
-        PublicClient, 
-        AuthenticatedClient, 
-        MAIN_URL
-    }
-};
-use futures::StreamExt;
+use futures::{StreamExt, FutureExt};
 use tokio::sync::mpsc;
 use tokio_postgres::{types::ToSql, NoTls};
 use chrono::{DateTime, Timelike, Utc, NaiveDateTime};
-use std::sync::Arc;
-use std::collections::VecDeque;
-use std::iter::Iterator;
+use std::{sync::Arc, collections::VecDeque, iter::Iterator};
+use cbpro::{
+    websocket::{Channels, WebSocketFeed, SANDBOX_FEED_URL},
+    client::{AuthenticatedClient, SANDBOX_URL, FILL, ORD}
+};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Connect to the database.
-    let (client, connection) =
+
+/*     let secret = "M0UEpXjC2kqfiyPgO4n+kyQpMZGVxZln/CH6qrz+OQBVZexjHFqsW3v3vyzcia5fVJGz7GlBcmu2mv+1fTD14A==";
+    let pass = "nu6ck2twnd";
+    let key = "f7cbb7dc1096f23f471693406b1e7007"; */
+
+    let secret = "zTfIRWZepcUnWQBAt8AXn57+YiPFTwCHh2gipTlCkM4A1Qx17NFI+/wzB9FEoXiWNV+4BsbqMFdM46/1SOJ0hQ==";
+    let pass = "mk3nv587pqf";
+    let key = "f9b2fe0ffbc5eb60ca20cbbb5fc94c4d";
+
+    let cb_client = AuthenticatedClient::new(key, pass, secret, SANDBOX_URL);
+    let cb_client = Arc::new(cb_client);
+    let cb_client1 = Arc::clone(&cb_client);
+    let cb_client2 = Arc::clone(&cb_client);
+
+    let (db_client, connection) =
         tokio_postgres::connect("host=timescaledb user=postgres password=test123", NoTls).await?;
     
-    let client = Arc::new(client);
-    let ticker_client = Arc::clone(&client);
-    let candle_client = Arc::clone(&client);
-    let ma_client = Arc::clone(&client);
+    let db_client = Arc::new(db_client);
+    let db_ticker_client = Arc::clone(&db_client);
+    let db_candle_client = Arc::clone(&db_client);
+    let db_ma_client = Arc::clone(&db_client);
 
-    let (mut ticker_tx, mut ticker_rx) = mpsc::channel(1000);
-    let (mut price_tx, mut price_rx) = mpsc::channel(1000);
+    let (mut ticker_tx, mut ticker_rx) = mpsc::channel(100);
+    let (mut price_tx, mut price_rx) = mpsc::channel(100);
+    let (mut rsi_tx, mut rsi_rx) = mpsc::channel(100);
 
     tokio::spawn(async move {
         if let Err(e) = connection.await {
@@ -34,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    client.simple_query(
+    db_client.simple_query(
             "CREATE TABLE IF NOT EXISTS ticker (
                 trade_id    INT PRIMARY KEY,
                 type        VARCHAR (50) NOT NULL,
@@ -54,7 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )"
         ).await?;
 
-    client.simple_query(
+    db_client.simple_query(
             "CREATE TABLE IF NOT EXISTS candle (
                 id      SERIAL PRIMARY KEY,
                 time    TIMESTAMP WITH TIME ZONE NOT NULL,
@@ -66,7 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )"
         ).await?;
 
-    client.simple_query(
+    db_client.simple_query(
         "CREATE TABLE IF NOT EXISTS moving_average (
             id          SERIAL PRIMARY KEY,
             time        TIMESTAMP WITH TIME ZONE NOT NULL,
@@ -80,7 +88,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ).await?;
 
     tokio::spawn(async move {
-        let statement = ticker_client.prepare(
+        let statement = db_ticker_client.prepare(
             "INSERT INTO ticker (
                 trade_id, type, sequence, 
                 time, product_id, price, 
@@ -89,7 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)"
         ).await.unwrap();
 
-        let mut feed = match WebSocketFeed::connect(WEBSOCKET_FEED_URL).await {
+        let mut feed = match WebSocketFeed::connect(SANDBOX_FEED_URL).await {
             Ok(feed) => feed,
             Err(e) => {
                 eprintln!("{:?}", e);
@@ -110,8 +118,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let price = v["price"].as_str().unwrap().parse::<f64>().unwrap();
                     let time = DateTime::parse_from_rfc3339(&v["time"].as_str().unwrap()).unwrap();
                     let last_size = v["last_size"].as_str().unwrap().parse::<f64>().unwrap();
+                    let best_bid = v["best_bid"].as_str().unwrap().parse::<f64>().unwrap();
+                    let best_ask = v["best_ask"].as_str().unwrap().parse::<f64>().unwrap();
                     
-                    if let Err(_) = ticker_tx.send((time, price, last_size)).await {
+                    if let Err(_) = ticker_tx.send((time, price, last_size, (best_bid, best_ask))).await {
                         println!("receiver dropped");
                         return;
                     }
@@ -122,8 +132,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let channel_type = v["type"].as_str().unwrap();
                     let sequence = v["sequence"].as_i64().unwrap() as i32;
                     let product_id = v["product_id"].as_str().unwrap();
-                    let best_bid = v["best_bid"].as_str().unwrap().parse::<f64>().unwrap();
-                    let best_ask = v["best_ask"].as_str().unwrap().parse::<f64>().unwrap();
                     let high_24h = v["high_24h"].as_str().unwrap().parse::<f64>().unwrap();
                     let low_24h = v["low_24h"].as_str().unwrap().parse::<f64>().unwrap();
                     let open_24h = v["open_24h"].as_str().unwrap().parse::<f64>().unwrap();
@@ -147,7 +155,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &volume_30d
                     ];
 
-                    if let Err(e) = ticker_client.execute(&statement, params).await {
+                    if let Err(e) = db_ticker_client.execute(&statement, params).await {
                         eprintln!("{:?}", e);
                         return;
                     }
@@ -161,7 +169,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     tokio::spawn(async move {
-        let statement = candle_client.prepare(
+        let statement = db_candle_client.prepare(
             "INSERT INTO candle (time, open, high, low, close, volume) 
             VALUES ($1, $2, $3, $4, $5, $6)"
         ).await.unwrap();
@@ -169,10 +177,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut bucket: Vec<(f64, f64)> = Vec::new();
         let mut oldtime: Option<NaiveDateTime> = None;
 
-        let public_client = PublicClient::new(MAIN_URL);
         let end = chrono::offset::Utc::now();
         let start = end - chrono::Duration::minutes(300);
-        let rates = match public_client.get_historic_rates("BTC-USD", 60).range(start, end).json().await {
+        let rates = match cb_client1.public().get_historic_rates("BTC-USD", 60).range(start, end).json().await {
             Ok(rates) => rates,
             Err(e) => {
                 eprintln!("{:?}", e);
@@ -192,24 +199,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let time = DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp(time, 0), Utc);
 
             if (close - open).is_sign_positive() {
-                if let Err(_) = price_tx.send((time, close, "gain", "old")).await {
+                if let Err(_) = price_tx.send((time, close, "gain", ("old", 0.0, 0.0))).await {
                     println!("close price receiver dropped");
                     return;
                 }
             } else {
-                if let Err(_) = price_tx.send((time, close, "loss", "old")).await {
+                if let Err(_) = price_tx.send((time, close, "loss", ("old", 0.0, 0.0))).await {
                     println!("close price receiver dropped");
                     return;
                 }
             }
 
-            if let Err(e) = candle_client.execute(&statement, &[&time, &open, &high, &low, &close, &volume]).await {
+            if let Err(e) = db_candle_client.execute(&statement, &[&time, &open, &high, &low, &close, &volume]).await {
                 eprintln!("{:?}", e);
                 return;
             }    
         }
 
-        while let Some((time, price, size)) = ticker_rx.recv().await {
+        while let Some((time, price, size, (bid, ask))) = ticker_rx.recv().await {
             if let Some(oldtime) = oldtime {  
                 if time.naive_utc().minute() == oldtime.minute() + 1 {
                     let open = bucket.iter().map(|t| t.0).next().unwrap_or(0./0.);
@@ -228,18 +235,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     
                     if (close - open).is_sign_positive() {
-                        if let Err(_) = price_tx.send((bucket_time, close, "gain", "new")).await {
+                        if let Err(_) = price_tx.send((bucket_time, close, "gain", ("new", ask, bid))).await {
                             println!("close price receiver dropped");
                             return;
                         }
                     } else {
-                        if let Err(_) = price_tx.send((bucket_time, close, "loss", "new")).await {
+                        if let Err(_) = price_tx.send((bucket_time, close, "loss", ("new", ask, bid))).await {
                             println!("close price receiver dropped");
                             return;
                         }
                     }
 
-                    if let Err(e) = candle_client.execute(&statement, &[&bucket_time, &open, &high, &low, &close, &volume]).await {
+                    if let Err(e) = db_candle_client.execute(&statement, &[&bucket_time, &open, &high, &low, &close, &volume]).await {
                         eprintln!("{:?}", e);
                         return;
                     }
@@ -255,50 +262,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     tokio::spawn(async move {
-        let statement = ma_client.prepare(
+        let statement = db_ma_client.prepare(
             "INSERT INTO moving_average (time, close, sma, ema, gains_ema, losses_ema, rsi) 
             VALUES ($1, $2, $3, $4, $5, $6, $7)"
         ).await.unwrap();
 
-        let size = 12;
-        let k = 2.0 / ( size as f64 + 1.0 );
+        let size = 12.0;
+        let k = 2.0 / ( size + 1.0 );
         let mut count = 0;
         
         let mut prev_ema: [Option<f64>; 3] = [None; 3];
-        let mut window: VecDeque<(f64, &str)> = VecDeque::with_capacity(size);
+        let mut window: VecDeque<(f64, &str)> = VecDeque::with_capacity(size as usize);
 
-        while let Some((time, price, direction, _)) = price_rx.recv().await {
-            if count == size - 1 {
+        while let Some((time, price, direction, status)) = price_rx.recv().await {
+            if count == size as usize - 1 {
                 window.push_back((price, direction));
 
-                let sum_all: f64 = window.iter().map(|t| t.0).sum();
-                let sum_gains: f64 = window.iter().map(|t| if t.1 == "gain" {t.0} else {0.}).sum();
-                let sum_losses: f64 = window.iter().map(|t| if t.1 == "loss" {t.0} else {0.}).sum();
+                let sma_all = window.iter().map(|t| t.0).sum::<f64>() / size;
+                let sma_gains = window.iter().map(|t| if t.1 == "gain" {t.0} else {0.}).sum::<f64>() / size;
+                let sma_losses = window.iter().map(|t| if t.1 == "loss" {t.0} else {0.}).sum::<f64>() / size;
                 
-                let mut ema_calc = |index, price, sum| {
+                let mut ema_calc = |index, new_price, sma| {
                     if let Some(ema) = prev_ema[index] {
-                        let ema = price * k + ema * (1.0 - k);
+                        let ema = new_price * k + ema * (1.0 - k);
                         prev_ema[index] = Some(ema);
                         Some(ema)
                     } else {
-                        prev_ema[index] = Some(sum / size as f64);
+                        prev_ema[index] = Some(sma);
                         None
                     }
                 };
 
-                let sma_all = sum_all / size as f64;
-                let ema_all = ema_calc(0, price, sum_all);
+                let ema_all = ema_calc(0, price, sma_all);
 
                 let ema_gains = if let "gain" = direction {
-                   ema_calc(1, price, sum_gains)
+                   ema_calc(1, price, sma_gains)
                 } else {
-                    ema_calc(1, 0., sum_gains)
+                    ema_calc(1, 0., sma_gains)
                 };
 
                 let ema_losses = if let "loss" = direction {
-                    ema_calc(2, price, sum_losses)
+                    ema_calc(2, price, sma_losses)
                  } else {
-                     ema_calc(2, 0., sum_losses)
+                     ema_calc(2, 0., sma_losses)
                  };
 
                 let rsi = if let (Some(gains), Some(losses)) = (&ema_gains , &ema_losses) {
@@ -306,6 +312,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     None
                 };
+
+                if let Err(_) = rsi_tx.send((rsi, status)).await {
+                    println!("rsi receiver dropped");
+                    return;
+                }
 
                 let params: &[&(dyn ToSql + Sync)] = &[
                     &time, 
@@ -317,7 +328,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &rsi
                 ];
             
-                if let Err(e) = ma_client.execute(&statement, params).await {
+                if let Err(e) = db_ma_client.execute(&statement, params).await {
                     eprintln!("{:?}", e);
                     return;
                 }
@@ -337,46 +348,150 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &None::<f64>
                 ];
 
-                if let Err(e) = ma_client.execute(&statement, params).await {
+                if let Err(e) = db_ma_client.execute(&statement, params).await {
                     eprintln!("{:?}", e);
                     return;
                 }
             } 
         }
 
-    }).await?;
+    });
 
     // trading starts here
-/*     tokio::spawn(async move {
-        let secret = "M0UEpXjC2kqfiyPgO4n+kyQpMZGVxZln/CH6qrz+OQBVZexjHFqsW3v3vyzcia5fVJGz7GlBcmu2mv+1fTD14A==";
-        let pass = "nu6ck2twnd";
-        let key = "f7cbb7dc1096f23f471693406b1e7007";
+    tokio::spawn(async move {
 
-        let client = AuthenticatedClient::new(key, pass, secret, MAIN_URL);
+        let get_fills = async {
+            let fills = cb_client2
+                .get_fills(FILL::ProductID("BTC-USD"))
+                .json()
+                .await;
 
-        while let Some((price, rsi, status)) = maker_rx.recv().await {
-            if let (Some(rsi), "new") = (rsi, status) {
-                if rsi < 31.0 {
+            match fills {
+                Ok(ref fill) => {
+                    println!("{}", serde_json::to_string_pretty(&fill[0]).unwrap());
+                    let side = String::from(fill[0]["side"].as_str().unwrap());
+                    let size = fill[0]["size"]
+                        .as_str()
+                        .unwrap()
+                        .parse::<f64>()
+                        .unwrap();
+    
+                    Ok((side, size))
+                },
+                Err(e) => {
+                    Err(format!("{:?}", e))
+                }
+            }
+        };
+        let get_fills1 = get_fills.shared();
+        let get_fills2 = get_fills1.clone();
+        
+        let (mut side, mut filled_size) = match get_fills1.await {
+            Ok(value) => value,
+            Err(e) => {
+                eprintln!("{:?}", e);
+                return;
+            }
+        };
 
-                    let size = 100.0 / price;
-                    let response = client
-                        .place_limit_order("BTC-USD", "buy", price, size)
-                        .time_in_force("IOC")
-                        .json()
-                        .await;
+        let (mut side, mut filled_size) = match get_fills2.await {
+            Ok(value) => value,
+            Err(e) => {
+                eprintln!("{:?}", e);
+                return;
+            }
+        };
 
-                    match response {
-                        Ok(res) => println!("{}", serde_json::to_string_pretty(&res).unwrap()),
-                        Err(e) => {
-                            eprintln!("{:?}", e);
-                            return;
-                        }
+        while let Some(status) = rsi_rx.recv().await {
+            if let (Some(rsi), ("new", bid, ask)) = status {
+                let holds = cb_client2
+                    .list_orders(&["open", "pending", "active"])
+                    .json()
+                    .await;
+
+                let holds = match holds {
+                    Ok(ref holds) => {
+                        println!("{}", serde_json::to_string_pretty(&holds).unwrap());
+                        holds
+                    }
+                    Err(e) => {
+                        eprintln!("{:?}", e);
+                        return;
+                    }
+                };
+
+                if holds.as_array().unwrap().is_empty() {
+                    if rsi < 75.0 && side == "sell" {
+                        let size = 500.0 / ask;
+                        let dp = 10.0_f64.powi(8);
+                        let size = (size * dp).round() / dp;
+    
+                        let response = cb_client2
+                            .place_limit_order("BTC-USD", "buy", ask, size)
+                            .cancel_after("min")
+                            .json()
+                            .await;
+    
+                        let id = match response {
+                            Ok(ref res) => res["id"].as_str().unwrap(),
+                            Err(e) => {
+                                eprintln!("{:?}", e);
+                                return;
+                            }
+                        };
+    
+                        let order = cb_client2
+                            .get_order(ORD::OrderID(id))
+                            .json()
+                            .await;
+    
+                        match order {
+                            Ok(ref ord) => {
+                                side = String::from(ord["side"].as_str().unwrap());
+                                filled_size = size;
+                                println!("{}", serde_json::to_string_pretty(&ord).unwrap());
+                                println!("{}", rsi);
+                            }
+                            Err(e) => {
+                                eprintln!("buy order failed: {:?}", e);
+                            }
+                        };
+                    } else if rsi > 75.0 && side == "buy" {
+                        let response = cb_client2
+                            .place_limit_order("BTC-USD", "sell", bid, filled_size)
+                            .cancel_after("min")
+                            .json()
+                            .await;
+    
+                        let id = match response {
+                            Ok(ref res) => res["id"].as_str().unwrap(),
+                            Err(e) => {
+                                eprintln!("{:?}", e);
+                                return;
+                            }
+                        };
+    
+                        let order = cb_client2
+                            .get_order(ORD::OrderID(id))
+                            .json()
+                            .await;
+    
+                        match order {
+                            Ok(ref ord) => {
+                                side = String::from(ord["side"].as_str().unwrap());
+                                println!("{}", serde_json::to_string_pretty(&ord).unwrap());
+                                println!("{}", rsi);
+                            }
+                            Err(e) => {
+                                eprintln!("sell order failed: {:?}", e);
+                            }
+                        };
                     }
                 }
             }
         }
 
-    }).await?; */
+    }).await?;
 
     Ok(())
 }
