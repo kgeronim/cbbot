@@ -235,12 +235,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     
                     if (close - open).is_sign_positive() {
-                        if let Err(_) = price_tx.send((bucket_time, close, "gain", ("new", ask, bid))).await {
+                        if let Err(_) = price_tx.send((bucket_time, close, "gain", ("new", bid, ask))).await {
                             println!("close price receiver dropped");
                             return;
                         }
                     } else {
-                        if let Err(_) = price_tx.send((bucket_time, close, "loss", ("new", ask, bid))).await {
+                        if let Err(_) = price_tx.send((bucket_time, close, "loss", ("new", bid, ask))).await {
                             println!("close price receiver dropped");
                             return;
                         }
