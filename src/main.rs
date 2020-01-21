@@ -1,11 +1,12 @@
 use futures::StreamExt;
 use tokio::sync::mpsc;
+use uuid::Uuid;
 use tokio_postgres::{types::ToSql, NoTls};
 use chrono::{DateTime, Timelike, Utc, NaiveDateTime};
 use std::{sync::Arc, collections::VecDeque, iter::Iterator};
 use cbpro::{
     websocket::{Channels, WebSocketFeed, SANDBOX_FEED_URL},
-    client::{AuthenticatedClient, SANDBOX_URL, FILL, ORD}
+    client::{AuthenticatedClient, SANDBOX_URL, ORD}
 };
 
 #[tokio::main]
@@ -31,6 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_ticker_client = Arc::clone(&db_client);
     let db_candle_client = Arc::clone(&db_client);
     let db_ma_client = Arc::clone(&db_client);
+    let db_state_client = Arc::clone(&db_client);
 
     let (mut ticker_tx, mut ticker_rx) = mpsc::channel(100);
     let (mut price_tx, mut price_rx) = mpsc::channel(100);
@@ -84,6 +86,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             gains_ema   FLOAT,
             losses_ema  FLOAT,
             rsi         FLOAT
+        )"
+    ).await?;
+
+    db_client.simple_query(
+        "CREATE TABLE IF NOT EXISTS state (
+            id          INT UNIQUE NOT NULL,
+            side        VARCHAR (50) NOT NULL,
+            filled_size FLOAT,
+            client_oid  UUID
         )"
     ).await?;
 
@@ -359,115 +370,134 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // trading starts here
     tokio::spawn(async move {
+        let init_statement = db_state_client.prepare(
+            "INSERT INTO state (id, side, filled_size, client_oid) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING"
+        ).await.unwrap();
+
+        let statement = db_state_client.prepare(
+            "SELECT * FROM state"
+        ).await.unwrap();
+
+        let update_statement = db_state_client.prepare(
+            "UPDATE state SET side = $1, filled_size = $2, client_oid = $3 WHERE id = 1"
+        ).await.unwrap();
+
+        let id: i32 = 1;
+        let init_side: &'static str = "sell";
+
+        if let Err(e) = db_state_client.execute(&init_statement, &[&id, &init_side, &None::<f64>, &None::<Uuid>]).await {
+            eprintln!("or here? {:?}", e);
+            return;
+        }
 
         while let Some(status) = rsi_rx.recv().await {
             if let (Some(rsi), ("new", bid, ask)) = status {
-                let holds = cb_client2
-                    .list_orders(&["open", "pending", "active"])
-                    .json()
-                    .await;
 
-                let holds = match holds {
-                    Ok(ref holds) => {
-                        println!("{}", serde_json::to_string_pretty(&holds).unwrap());
-                        holds
-                    }
-                    Err(e) => {
+                let (side, filled_size, uuid): (String, Option<f64>, Option<Uuid>) = match db_state_client.query_one(&statement, &[]).await {
+                    Ok(row) => (row.get("side"), row.get("filled_size"), row.get("client_oid")),
+                    Err(e) =>  {
                         eprintln!("{:?}", e);
                         return;
                     }
                 };
 
-                if holds.as_array().unwrap().is_empty() {
+                println!("{:?}", uuid);
 
-                    let fills = cb_client2
-                    .get_fills(FILL::ProductID("BTC-USD"))
-                    .json()
-                    .await;
-        
-                    let (side, filled_size) = match fills {
-                        Ok(ref fill) => {
-                            println!("{}", serde_json::to_string_pretty(&fill[0]).unwrap());
-                            let side = String::from(fill[0]["side"].as_str().unwrap());
-                            let size = fill[0]["size"]
-                                .as_str()
-                                .unwrap()
-                                .parse::<f64>()
-                                .unwrap();
-            
-                            (side, size)
-                        },
+                let (side, filled_size) = if let (side, filled_size, Some(uuid)) =  (side, filled_size, uuid) {
+                    let order = cb_client2
+                        .get_order(ORD::ClientOID(&uuid.to_hyphenated().to_string()))
+                        .json()
+                        .await;
+    
+                    match order {
+                        Ok(ref ord) => {
+                            let status = ord["status"].as_str().unwrap();
+                            let settled = ord["settled"].as_bool().unwrap();
+
+                            if let ("done", true) = (status, settled) {
+                                let side = String::from(ord["side"].as_str().unwrap());
+                                let size = ord["size"].as_str()
+                                    .unwrap()
+                                    .parse::<f64>()
+                                    .unwrap();
+
+                                println!("{}", serde_json::to_string_pretty(&ord).unwrap());
+                                (side, Some(size))
+                            } else {
+                                continue
+                            }
+                            
+                        }
                         Err(e) => {
+                            eprintln!("{:?}", e);
+                            if side == "sell" {
+                                (String::from("buy"), filled_size)
+                            } else {
+                                (String::from("sell"), None)
+                            }
+                        }
+                    }
+ 
+                } else {
+                    (String::from(init_side), None)
+                };
+
+                if rsi < 80.0 && side == "sell" {
+                    let size = 500.0 / ask;
+                    let dp = 10.0_f64.powi(8);
+                    let size = (size * dp).round() / dp;
+                    let uuid = Uuid::new_v4();
+                    let client_oid = uuid.to_hyphenated().to_string();
+                    let side: &str = "buy";
+
+                    let response = cb_client2
+                        .place_limit_order("BTC-USD", side, ask, size)
+                        .client_oid(&client_oid)
+                        .cancel_after("min")
+                        .json()
+                        .await;
+
+                    if let Err(e) = response {
+                        eprintln!("{:?}", e);
+                        return;
+                    }
+                    
+                    if let Err(e) = db_state_client.execute(&update_statement, &[&side, &size, &uuid]).await {
+                        eprintln!("{:?}", e);
+                        return;
+                    }
+
+                } else if rsi > 80.0 && side == "buy" {
+                    let uuid = Uuid::new_v4();
+                    let client_oid = uuid.to_hyphenated().to_string();
+                    let side: &str = "sell";
+                    
+                    let size = if let Some(filled_size) = filled_size {
+                        filled_size
+                    } else {
+                        eprintln!("world is ending");
+                        return
+                    };
+
+                    let response = cb_client2
+                        .place_limit_order("BTC-USD", side, bid, size)
+                        .client_oid(&client_oid)
+                        .cancel_after("min")
+                        .json()
+                        .await;
+
+                        if let Err(e) = response {
+                            eprintln!("{:?}", e);
+                            return;
+                        }
+    
+                        if let Err(e) = db_state_client.execute(&update_statement, &[&side, &size, &uuid]).await {
                             eprintln!("{:?}", e);
                             return;
                         }
                     };
 
-                    if rsi < 75.0 && side == "sell" {
-                        let size = 500.0 / ask;
-                        let dp = 10.0_f64.powi(8);
-                        let size = (size * dp).round() / dp;
-    
-                        let response = cb_client2
-                            .place_limit_order("BTC-USD", "buy", ask, size)
-                            .cancel_after("min")
-                            .json()
-                            .await;
-    
-                        let id = match response {
-                            Ok(ref res) => res["id"].as_str().unwrap(),
-                            Err(e) => {
-                                eprintln!("{:?}", e);
-                                return;
-                            }
-                        };
-    
-                        let order = cb_client2
-                            .get_order(ORD::OrderID(id))
-                            .json()
-                            .await;
-    
-                        match order {
-                            Ok(ref ord) => {
-                                println!("{}", serde_json::to_string_pretty(&ord).unwrap());
-                                println!("{}", rsi);
-                            }
-                            Err(e) => {
-                                eprintln!("buy order failed: {:?}", e);
-                            }
-                        };
-                    } else if rsi > 75.0 && side == "buy" {
-                        let response = cb_client2
-                            .place_limit_order("BTC-USD", "sell", bid, filled_size)
-                            .cancel_after("min")
-                            .json()
-                            .await;
-    
-                        let id = match response {
-                            Ok(ref res) => res["id"].as_str().unwrap(),
-                            Err(e) => {
-                                eprintln!("{:?}", e);
-                                return;
-                            }
-                        };
-    
-                        let order = cb_client2
-                            .get_order(ORD::OrderID(id))
-                            .json()
-                            .await;
-    
-                        match order {
-                            Ok(ref ord) => {
-                                println!("{}", serde_json::to_string_pretty(&ord).unwrap());
-                                println!("{}", rsi);
-                            }
-                            Err(e) => {
-                                eprintln!("sell order failed: {:?}", e);
-                            }
-                        };
-                    }
                 }
-            }
         }
 
     }).await?;
