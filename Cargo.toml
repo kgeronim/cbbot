@@ -14,3 +14,6 @@ futures = "0.3.1"
 tokio-postgres = { version = "0.5.1", features = ["with-chrono-0_4", "with-uuid-0_8"] }
 chrono = "0.4.10"
 uuid = { version = "0.8.1", features = ["serde", "v4"] }
+log = { version = "0.4", features = ["std", "serde"] }
+simple_logger = "1.4.0"
+clap = "2.33.0"

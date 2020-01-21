@@ -1,6 +1,8 @@
+use uuid::Uuid;
 use futures::StreamExt;
 use tokio::sync::mpsc;
-use uuid::Uuid;
+use clap::{Arg, App, SubCommand};
+use log::{error, info, warn, Level};
 use tokio_postgres::{types::ToSql, NoTls};
 use chrono::{DateTime, Timelike, Utc, NaiveDateTime};
 use std::{sync::Arc, collections::VecDeque, iter::Iterator};
@@ -11,10 +13,18 @@ use cbpro::{
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let _ = App::new("myapp")
+                          .version("0.1.0")
+                          .author("kgeronim <kevin.geronimo@outlook.com>")
+                          .about("Coinbase Pro RSI Mean Reversion Trading Bot")
+                          .arg(Arg::with_name("granularity")
+                                .long("granularity")
+                                .takes_value(true)
+                                .possible_values(&["1m", "5m", "15m", "30m"]))
 
-/*     let secret = "M0UEpXjC2kqfiyPgO4n+kyQpMZGVxZln/CH6qrz+OQBVZexjHFqsW3v3vyzcia5fVJGz7GlBcmu2mv+1fTD14A==";
-    let pass = "nu6ck2twnd";
-    let key = "f7cbb7dc1096f23f471693406b1e7007"; */
+                          .get_matches();
+
+    simple_logger::init_with_level(Level::Info).unwrap();
 
     let secret = "zTfIRWZepcUnWQBAt8AXn57+YiPFTwCHh2gipTlCkM4A1Qx17NFI+/wzB9FEoXiWNV+4BsbqMFdM46/1SOJ0hQ==";
     let pass = "mk3nv587pqf";
@@ -40,12 +50,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            eprintln!("connection error: {}", e);
+            error!("connection error: {}", e);
         }
     });
 
+    db_client.simple_query("DROP TABLE IF EXISTS ticker;").await?;
+    db_client.simple_query("DROP TABLE IF EXISTS candle;").await?;
+    db_client.simple_query("DROP TABLE IF EXISTS moving_average;").await?;
+
     db_client.simple_query(
-            "CREATE TABLE IF NOT EXISTS ticker (
+            "CREATE TABLE ticker (
                 trade_id    INT PRIMARY KEY,
                 type        VARCHAR (50) NOT NULL,
                 sequence    INT NOT NULL,
@@ -65,7 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ).await?;
 
     db_client.simple_query(
-            "CREATE TABLE IF NOT EXISTS candle (
+            "CREATE TABLE candle (
                 id      SERIAL PRIMARY KEY,
                 time    TIMESTAMP WITH TIME ZONE NOT NULL,
                 open    FLOAT NOT NULL,
@@ -77,7 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ).await?;
 
     db_client.simple_query(
-        "CREATE TABLE IF NOT EXISTS moving_average (
+        "CREATE TABLE moving_average (
             id          SERIAL PRIMARY KEY,
             time        TIMESTAMP WITH TIME ZONE NOT NULL,
             close       FLOAT NOT NULL,
@@ -91,9 +105,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     db_client.simple_query(
         "CREATE TABLE IF NOT EXISTS state (
-            id          INT UNIQUE NOT NULL,
+            id          INT PRIMARY KEY,
             side        VARCHAR (50) NOT NULL,
-            filled_size FLOAT,
+            size        FLOAT,
             client_oid  UUID
         )"
     ).await?;
@@ -111,13 +125,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut feed = match WebSocketFeed::connect(SANDBOX_FEED_URL).await {
             Ok(feed) => feed,
             Err(e) => {
-                eprintln!("{:?}", e);
+                error!("{:?}", e);
                 return;
             }
         };
 
         if let Err(e) = feed.subscribe(&["BTC-USD"], &[Channels::TICKER]).await {
-            eprintln!("{:?}", e);
+            error!("{:?}", e);
             return;
         }
 
@@ -133,7 +147,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let best_ask = v["best_ask"].as_str().unwrap().parse::<f64>().unwrap();
                     
                     if let Err(_) = ticker_tx.send((time, price, last_size, (best_bid, best_ask))).await {
-                        println!("receiver dropped");
+                        error!("receiver dropped");
                         return;
                     }
                     
@@ -167,12 +181,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ];
 
                     if let Err(e) = db_ticker_client.execute(&statement, params).await {
-                        eprintln!("{:?}", e);
+                        error!("{:?}", e);
                         return;
                     }
                 }
                 Err(e) => {
-                    eprintln!("{:?}", e);
+                    error!("{:?}", e);
                     return;
                 }
             }
@@ -186,14 +200,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ).await.unwrap();
 
         let mut bucket: Vec<(f64, f64)> = Vec::new();
-        let mut oldtime: Option<NaiveDateTime> = None;
+        let mut prev_time: Option<NaiveDateTime> = None;
 
         let end = chrono::offset::Utc::now();
         let start = end - chrono::Duration::minutes(300);
         let rates = match cb_client1.public().get_historic_rates("BTC-USD", 60).range(start, end).json().await {
             Ok(rates) => rates,
             Err(e) => {
-                eprintln!("{:?}", e);
+                error!("{:?}", e);
                 return;
             }
         };
@@ -211,32 +225,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             if (close - open).is_sign_positive() {
                 if let Err(_) = price_tx.send((time, close, "gain", ("old", 0.0, 0.0))).await {
-                    println!("close price receiver dropped");
+                    error!("close price receiver dropped");
                     return;
                 }
             } else {
                 if let Err(_) = price_tx.send((time, close, "loss", ("old", 0.0, 0.0))).await {
-                    println!("close price receiver dropped");
+                    error!("close price receiver dropped");
                     return;
                 }
             }
 
             if let Err(e) = db_candle_client.execute(&statement, &[&time, &open, &high, &low, &close, &volume]).await {
-                eprintln!("{:?}", e);
+                error!("{:?}", e);
                 return;
             }    
         }
 
         while let Some((time, price, size, (bid, ask))) = ticker_rx.recv().await {
-            if let Some(oldtime) = oldtime {  
-                if time.naive_utc().minute() == oldtime.minute() + 1 {
+            if let Some(prev_time) = prev_time {  
+                if time.naive_utc().minute() == prev_time.minute() + 1 {
                     let open = bucket.iter().map(|t| t.0).next().unwrap_or(0./0.);
                     let high = bucket.iter().map(|t| t.0).fold(0./0., f64::max);
                     let low = bucket.iter().map(|t| t.0).fold(0./0., f64::min);
                     let close = bucket.iter().map(|t| t.0).last().unwrap_or(0./0.);
                     let volume: f64 = bucket.iter().map(|t| t.1).sum();
 
-                    let bucket_time = oldtime
+                    let bucket_time = prev_time
                         .with_second(0)
                         .unwrap()
                         .with_nanosecond(0)
@@ -247,18 +261,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     
                     if (close - open).is_sign_positive() {
                         if let Err(_) = price_tx.send((bucket_time, close, "gain", ("new", bid, ask))).await {
-                            println!("close price receiver dropped");
+                            error!("close price receiver dropped");
                             return;
                         }
                     } else {
                         if let Err(_) = price_tx.send((bucket_time, close, "loss", ("new", bid, ask))).await {
-                            println!("close price receiver dropped");
+                            error!("close price receiver dropped");
                             return;
                         }
                     }
 
                     if let Err(e) = db_candle_client.execute(&statement, &[&bucket_time, &open, &high, &low, &close, &volume]).await {
-                        eprintln!("{:?}", e);
+                        error!("{:?}", e);
                         return;
                     }
 
@@ -266,7 +280,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             
-            oldtime = Some(time.naive_utc());
+            prev_time = Some(time.naive_utc());
             bucket.push((price, size));
         }
 
@@ -325,7 +339,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
 
                 if let Err(_) = rsi_tx.send((rsi, status)).await {
-                    println!("rsi receiver dropped");
+                    error!("rsi receiver dropped");
                     return;
                 }
 
@@ -340,7 +354,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ];
             
                 if let Err(e) = db_ma_client.execute(&statement, params).await {
-                    eprintln!("{:?}", e);
+                    error!("{:?}", e);
                     return;
                 }
                 
@@ -360,7 +374,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ];
 
                 if let Err(e) = db_ma_client.execute(&statement, params).await {
-                    eprintln!("{:?}", e);
+                    error!("{:?}", e);
                     return;
                 }
             } 
@@ -371,7 +385,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // trading starts here
     tokio::spawn(async move {
         let init_statement = db_state_client.prepare(
-            "INSERT INTO state (id, side, filled_size, client_oid) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING"
+            "INSERT INTO state (id, side, size, client_oid) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING"
         ).await.unwrap();
 
         let statement = db_state_client.prepare(
@@ -379,33 +393,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ).await.unwrap();
 
         let update_statement = db_state_client.prepare(
-            "UPDATE state SET side = $1, filled_size = $2, client_oid = $3 WHERE id = 1"
+            "UPDATE state SET side = $1, size = $2, client_oid = $3 WHERE id = 1"
         ).await.unwrap();
 
         let id: i32 = 1;
         let init_side: &'static str = "sell";
 
         if let Err(e) = db_state_client.execute(&init_statement, &[&id, &init_side, &None::<f64>, &None::<Uuid>]).await {
-            eprintln!("or here? {:?}", e);
+            error!("{:?}", e);
             return;
         }
 
         while let Some(status) = rsi_rx.recv().await {
             if let (Some(rsi), ("new", bid, ask)) = status {
 
-                let (side, filled_size, uuid): (String, Option<f64>, Option<Uuid>) = match db_state_client.query_one(&statement, &[]).await {
-                    Ok(row) => (row.get("side"), row.get("filled_size"), row.get("client_oid")),
+                let (side, size, uuid): (String, Option<f64>, Option<Uuid>) = match db_state_client.query_one(&statement, &[]).await {
+                    Ok(row) => (row.get("side"), row.get("size"), row.get("client_oid")),
                     Err(e) =>  {
-                        eprintln!("{:?}", e);
+                        error!("{:?}", e);
                         return;
                     }
                 };
 
-                println!("{:?}", uuid);
-
-                let (side, filled_size) = if let (side, filled_size, Some(uuid)) =  (side, filled_size, uuid) {
+                let (side, size) = if let (side, size, Some(uuid)) =  (side, size, uuid) {
+                    let client_oid = &uuid.to_hyphenated().to_string();
                     let order = cb_client2
-                        .get_order(ORD::ClientOID(&uuid.to_hyphenated().to_string()))
+                        .get_order(ORD::ClientOID(client_oid))
                         .json()
                         .await;
     
@@ -421,18 +434,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .parse::<f64>()
                                     .unwrap();
 
-                                println!("{}", serde_json::to_string_pretty(&ord).unwrap());
                                 (side, Some(size))
                             } else {
                                 continue
                             }
                             
                         }
-                        Err(e) => {
-                            eprintln!("{:?}", e);
+                        Err(_) => {
+                            warn!("Limit {} order cancelled, client_oid: {}", side, client_oid);
                             if side == "sell" {
-                                (String::from("buy"), filled_size)
+                                info!("Reversing to buy");
+                                (String::from("buy"), size)
                             } else {
+                                info!("Reversing to sell", );
                                 (String::from("sell"), None)
                             }
                         }
@@ -442,13 +456,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     (String::from(init_side), None)
                 };
 
-                if rsi < 80.0 && side == "sell" {
+                if rsi < 75.0 && side == "sell" {
                     let size = 500.0 / ask;
                     let dp = 10.0_f64.powi(8);
                     let size = (size * dp).round() / dp;
                     let uuid = Uuid::new_v4();
                     let client_oid = uuid.to_hyphenated().to_string();
-                    let side: &str = "buy";
+                    let side: &'static str = "buy";
 
                     let response = cb_client2
                         .place_limit_order("BTC-USD", side, ask, size)
@@ -457,25 +471,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .json()
                         .await;
 
+                    info!("buy limit order, client_oid: {}, price: {}, size: {}", client_oid, ask, size);
                     if let Err(e) = response {
-                        eprintln!("{:?}", e);
+                        error!("{:?}", e);
                         return;
                     }
                     
                     if let Err(e) = db_state_client.execute(&update_statement, &[&side, &size, &uuid]).await {
-                        eprintln!("{:?}", e);
+                        error!("{:?}", e);
                         return;
                     }
 
-                } else if rsi > 80.0 && side == "buy" {
+                } else if rsi > 75.0 && side == "buy" {
                     let uuid = Uuid::new_v4();
                     let client_oid = uuid.to_hyphenated().to_string();
-                    let side: &str = "sell";
+                    let side: &'static str = "sell";
                     
-                    let size = if let Some(filled_size) = filled_size {
-                        filled_size
+                    let size = if let Some(size) = size {
+                        size
                     } else {
-                        eprintln!("world is ending");
+                        error!("world is ending");
                         return
                     };
 
@@ -486,20 +501,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .json()
                         .await;
 
-                        if let Err(e) = response {
-                            eprintln!("{:?}", e);
-                            return;
-                        }
-    
-                        if let Err(e) = db_state_client.execute(&update_statement, &[&side, &size, &uuid]).await {
-                            eprintln!("{:?}", e);
-                            return;
-                        }
-                    };
+                    info!("sell limit order, client_oid: {}, price: {}, size: {}", client_oid, bid, size);
+                    if let Err(e) = response {
+                        error!("{:?}", e);
+                        return;
+                    }
 
-                }
+                    if let Err(e) = db_state_client.execute(&update_statement, &[&side, &size, &uuid]).await {
+                        error!("{:?}", e);
+                        return;
+                    }
+                };
+            }
         }
-
     }).await?;
 
     Ok(())
