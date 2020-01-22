@@ -1,5 +1,5 @@
 use uuid::Uuid;
-use futures::StreamExt;
+use futures::{StreamExt, join};
 use tokio::sync::mpsc;
 use clap::{Arg, App};
 use log::{error, info, warn, debug, Level};
@@ -10,6 +10,18 @@ use cbpro::{
     websocket::{Channels, WebSocketFeed, SANDBOX_FEED_URL},
     client::{AuthenticatedClient, SANDBOX_URL, ORD}
 };
+
+fn validator(x: String) -> Result<(), String> {
+    if let Ok(x) = x.parse::<u32>() {
+        if x <= 100 {
+            Ok(())
+        } else {
+            Err(String::from("value has to be between 0-100"))
+        }
+    } else {
+        Err(String::from("value has to be between 0-100"))
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -27,39 +39,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .long("ema")
             .takes_value(true)
             .possible_values(&["12", "26"]))
+        .arg(Arg::with_name("PRODUCT-ID")
+            .help("Trading pair that will be used for trading")
+            .required(true)
+            .index(1))
+        .arg(Arg::with_name("POSITION")
+            .help("USD funds to take position with")
+            .required(true)
+            .index(2))
         .arg(Arg::with_name("RSI-BUY")
             .help("Buy at or above the provided rsi")
             .required(true)
-            .index(1)
-            .validator(|x| {
-                if x.parse::<u32>().unwrap() <= 100 {
-                    Ok(())
-                } else {
-                    Err(String::from("value has to be between 0-100"))
-                }
-            }))
+            .index(3)
+            .validator(validator))
         .arg(Arg::with_name("RSI-SELL")
             .help("Sell at or below the provided rsi")
             .required(true)
-            .index(2)
-            .validator(|x| {
-                if x.parse::<u32>().unwrap() <= 100 {
-                    Ok(())
-                } else {
-                    Err(String::from("value has to be between 0-100"))
-                }
-            }))
+            .index(4)
+            .validator(validator))
         .get_matches();
 
     simple_logger::init_with_level(Level::Info).unwrap();
     let granularity = matches.value_of("granularity").map_or(60, |x| x.parse::<i64>().unwrap());
     let window_size = matches.value_of("ema").map_or(12.0, |x| x.parse::<f64>().unwrap());
+    let position = matches.value_of("POSITION").map(|x| x.parse::<f64>().unwrap()).unwrap();
     let rsi_buy = matches.value_of("RSI-BUY").map(|x| x.parse::<f64>().unwrap()).unwrap();
     let rsi_sell = matches.value_of("RSI-SELL").map(|x| x.parse::<f64>().unwrap()).unwrap();
+    let product_id = String::from(matches.value_of("PRODUCT-ID").unwrap());
 
+    let product_id1 = product_id.clone();
+    let product_id2 = product_id.clone();
+    let product_id3 = product_id.clone();
+    
     if rsi_buy >= rsi_sell {
-        error!("Are you trying to lose your money?");
-        panic!("Buy low sell high not the other way around")
+        error!("Buy low sell high not the other way around...");
+        panic!()
     }
 
     let secret = "zTfIRWZepcUnWQBAt8AXn57+YiPFTwCHh2gipTlCkM4A1Qx17NFI+/wzB9FEoXiWNV+4BsbqMFdM46/1SOJ0hQ==";
@@ -70,6 +84,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cb_client = Arc::new(cb_client);
     let cb_client1 = Arc::clone(&cb_client);
     let cb_client2 = Arc::clone(&cb_client);
+
+    let products = cb_client.public().get_products().json();
+    let accounts = cb_client.list_accounts().json();
+    let (products, accounts) = join!(products, accounts);
+    let (products, accounts) = (products?, accounts?);
+
+    let products = products.as_array().unwrap();
+    let mut products = products.iter().filter(|x| product_id == x["id"].as_str().unwrap());
+    if let None = products.next() {
+        error!("PRODUCT-ID not found");
+        panic!()
+    }
+
+    let accounts = accounts.as_array().unwrap();
+    for account in accounts {
+        if account["currency"].as_str().unwrap() == "USD" {
+            let balance = account["available"].as_str().unwrap().parse::<f64>().unwrap();
+            if position > balance {
+                error!("Not enough funds to take that position");
+                panic!() 
+            }
+        }
+    }
 
     let (db_client, connection) =
         tokio_postgres::connect("host=timescaledb user=postgres password=test123", NoTls).await?;
@@ -166,16 +203,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
-        if let Err(e) = feed.subscribe(&["BTC-USD"], &[Channels::TICKER]).await {
+        let product_ids = [&product_id1[..]];
+        if let Err(e) = feed.subscribe(&product_ids[..], &[Channels::TICKER]).await {
             error!("{:?}", e);
             return;
         }
 
-        feed.next().await;
-
         while let Some(value) = feed.next().await {
             match value {
                 Ok(v) => {
+                    let channel_type = v["type"].as_str().unwrap();
+
+                    if channel_type != Channels::TICKER {
+                        debug!("skipping channel: {}", channel_type);
+                        continue
+                    }
+
                     let price = v["price"].as_str().unwrap().parse::<f64>().unwrap();
                     let time = DateTime::parse_from_rfc3339(&v["time"].as_str().unwrap()).unwrap();
                     let last_size = v["last_size"].as_str().unwrap().parse::<f64>().unwrap();
@@ -194,7 +237,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let volume_24h = v["volume_24h"].as_str().unwrap().parse::<f64>().unwrap();
                     let side = v["side"].as_str().unwrap();
                     let trade_id = v["trade_id"].as_i64().unwrap() as i32;
-                    let channel_type = v["type"].as_str().unwrap();
                     let sequence = v["sequence"].as_i64().unwrap() as i32;
                     let product_id = v["product_id"].as_str().unwrap();
                     let high_24h = v["high_24h"].as_str().unwrap().parse::<f64>().unwrap();
@@ -244,7 +286,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let end = Utc::now() - Duration::seconds(granularity - 30);
         let start = end - Duration::seconds(300 * granularity);
         let rates = match cb_client1.public()
-        .get_historic_rates("BTC-USD", granularity as i32).range(start, end).json().await {
+        .get_historic_rates(&product_id2, granularity as i32).range(start, end).json().await {
             Ok(rates) => rates,
             Err(e) => {
                 error!("{:?}", e);
@@ -497,7 +539,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
 
                 if rsi <= rsi_buy && side == "sell" {
-                    let size = 500.0 / ask;
+                    let size = position / ask;
                     let dp = 10.0_f64.powi(8);
                     let size = (size * dp).round() / dp;
                     let uuid = Uuid::new_v4();
@@ -505,7 +547,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let side: &'static str = "buy";
 
                     let response = cb_client2
-                        .place_limit_order("BTC-USD", side, ask, size)
+                        .place_limit_order(&product_id3, side, ask, size)
                         .client_oid(&client_oid)
                         .cancel_after("min")
                         .json()
@@ -535,7 +577,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     };
 
                     let response = cb_client2
-                        .place_limit_order("BTC-USD", side, bid, size)
+                        .place_limit_order(&product_id3, side, bid, size)
                         .client_oid(&client_oid)
                         .cancel_after("min")
                         .json()
