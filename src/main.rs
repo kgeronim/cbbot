@@ -2,7 +2,7 @@ use uuid::Uuid;
 use futures::StreamExt;
 use tokio::sync::mpsc;
 use clap::{Arg, App};
-use log::{error, info, warn, Level};
+use log::{error, info, warn, debug, Level};
 use tokio_postgres::{types::ToSql, NoTls};
 use chrono::{DateTime, Timelike, Datelike, Utc, NaiveDateTime, Duration};
 use std::{sync::Arc, collections::VecDeque, iter::Iterator};
@@ -13,20 +13,24 @@ use cbpro::{
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let matches = App::new("myapp")
-                          .version("0.1.0")
-                          .author("kgeronim <kevin.geronimo@outlook.com>")
-                          .about("Coinbase Pro RSI Mean Reversion Trading Bot")
-                          .arg(Arg::with_name("granularity")
-                                .short("g")
-                                .long("granularity")
-                                .takes_value(true)
-                                .possible_values(&["60", "300", "900", "3600", "21600", "86400"]))
-
-                          .get_matches();
+    let matches = App::new("prototype")
+        .version("0.1.0")
+        .author("kgeronim <kevin.geronimo@outlook.com>")
+        .about("Coinbase Pro RSI Mean Reversion Trading Bot")
+        .arg(Arg::with_name("granularity")
+            .short("g")
+            .long("granularity")
+            .takes_value(true)
+            .possible_values(&["60", "300", "900", "3600", "21600", "86400"]))
+        .arg(Arg::with_name("ema")
+            .long("ema")
+            .takes_value(true)
+            .possible_values(&["12", "26"]))
+        .get_matches();
 
     simple_logger::init_with_level(Level::Info).unwrap();
     let granularity = matches.value_of("granularity").map_or(60, |x| x.parse::<i64>().unwrap());
+    let window_size = matches.value_of("ema").map_or(12.0, |x| x.parse::<f64>().unwrap());
 
     let secret = "zTfIRWZepcUnWQBAt8AXn57+YiPFTwCHh2gipTlCkM4A1Qx17NFI+/wzB9FEoXiWNV+4BsbqMFdM46/1SOJ0hQ==";
     let pass = "mk3nv587pqf";
@@ -260,7 +264,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let first_tick = bucket.iter().map(|t| t.2).next();
             
             if let Some(first_tick) = first_tick {
-                info!("bucket start time: {:?}", first_tick);
+                debug!("bucket start time: {:?}", first_tick);
 
                 if time - first_tick == elapsed_time {
                     let open = bucket.iter().map(|t| t.0).next().unwrap_or(0./0.);
@@ -304,20 +308,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             VALUES ($1, $2, $3, $4, $5, $6, $7)"
         ).await.unwrap();
 
-        let size = 12.0;
-        let k = 2.0 / ( size + 1.0 );
+        let k = 2.0 / ( window_size + 1.0 );
         let mut count = 0;
         
         let mut prev_ema: [Option<f64>; 3] = [None; 3];
-        let mut window: VecDeque<(f64, &str)> = VecDeque::with_capacity(size as usize);
+        let mut window: VecDeque<(f64, &str)> = VecDeque::with_capacity(window_size as usize);
 
         while let Some((time, price, direction, status)) = price_rx.recv().await {
-            if count == size as usize - 1 {
+            if count == window_size as usize - 1 {
                 window.push_back((price, direction));
 
-                let sma_all = window.iter().map(|t| t.0).sum::<f64>() / size;
-                let sma_gains = window.iter().map(|t| if t.1 == "gain" {t.0} else {0.}).sum::<f64>() / size;
-                let sma_losses = window.iter().map(|t| if t.1 == "loss" {t.0} else {0.}).sum::<f64>() / size;
+                let sma_all = window.iter().map(|t| t.0).sum::<f64>() / window_size;
+                let sma_gains = window.iter().map(|t| if t.1 == "gain" {t.0} else {0.}).sum::<f64>() / window_size;
+                let sma_losses = window.iter().map(|t| if t.1 == "loss" {t.0} else {0.}).sum::<f64>() / window_size;
                 
                 let mut ema_calc = |index, new_price, sma| {
                     if let Some(ema) = prev_ema[index] {
