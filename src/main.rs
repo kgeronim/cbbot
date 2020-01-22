@@ -1,14 +1,14 @@
 use uuid::Uuid;
 use futures::StreamExt;
-use tokio::{sync::mpsc, time::{Duration, Instant}};
+use tokio::sync::mpsc;
 use clap::{Arg, App};
-use log::{error, info, warn, debug, Level};
+use log::{error, info, warn, Level};
 use tokio_postgres::{types::ToSql, NoTls};
 use chrono::{DateTime, Timelike, Datelike, Utc, NaiveDateTime};
 use std::{sync::Arc, collections::VecDeque, iter::Iterator};
 use cbpro::{
-    websocket::{Channels, WebSocketFeed, WEBSOCKET_FEED_URL},
-    client::{AuthenticatedClient, MAIN_URL, ORD}
+    websocket::{Channels, WebSocketFeed, SANDBOX_FEED_URL},
+    client::{AuthenticatedClient, SANDBOX_URL, ORD}
 };
 
 #[tokio::main]
@@ -32,7 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pass = "mk3nv587pqf";
     let key = "f9b2fe0ffbc5eb60ca20cbbb5fc94c4d";
 
-    let cb_client = AuthenticatedClient::new(key, pass, secret, MAIN_URL);
+    let cb_client = AuthenticatedClient::new(key, pass, secret, SANDBOX_URL);
     let cb_client = Arc::new(cb_client);
     let cb_client1 = Arc::clone(&cb_client);
     let cb_client2 = Arc::clone(&cb_client);
@@ -130,7 +130,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)"
         ).await.unwrap();
 
-        let mut feed = match WebSocketFeed::connect(WEBSOCKET_FEED_URL).await {
+        let mut feed = match WebSocketFeed::connect(SANDBOX_FEED_URL).await {
             Ok(feed) => feed,
             Err(e) => {
                 error!("{:?}", e);
@@ -418,7 +418,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         while let Some(status) = rsi_rx.recv().await {
-/*             if let (Some(rsi), ("new", bid, ask)) = status {
+            if let (Some(rsi), ("new", bid, ask)) = status {
 
                 let (side, size, uuid): (String, Option<f64>, Option<Uuid>) = match db_state_client.query_one(&statement, &[]).await {
                     Ok(row) => (row.get("side"), row.get("size"), row.get("client_oid")),
@@ -525,7 +525,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         return;
                     }
                 };
-            } */
+            }
         }
     }).await?;
 
