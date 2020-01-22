@@ -13,7 +13,8 @@ use cbpro::{
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let matches = App::new("prototype")
+    
+    let matches = App::new("cbpro-rsi-bot")
         .version("0.1.0")
         .author("kgeronim <kevin.geronimo@outlook.com>")
         .about("Coinbase Pro RSI Mean Reversion Trading Bot")
@@ -26,11 +27,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .long("ema")
             .takes_value(true)
             .possible_values(&["12", "26"]))
+        .arg(Arg::with_name("RSI-BUY")
+            .help("Buy at or above the provided rsi")
+            .required(true)
+            .index(1)
+            .validator(|x| {
+                if x.parse::<u32>().unwrap() <= 100 {
+                    Ok(())
+                } else {
+                    Err(String::from("value has to be between 0-100"))
+                }
+            }))
+        .arg(Arg::with_name("RSI-SELL")
+            .help("Sell at or below the provided rsi")
+            .required(true)
+            .index(2)
+            .validator(|x| {
+                if x.parse::<u32>().unwrap() <= 100 {
+                    Ok(())
+                } else {
+                    Err(String::from("value has to be between 0-100"))
+                }
+            }))
         .get_matches();
 
     simple_logger::init_with_level(Level::Info).unwrap();
     let granularity = matches.value_of("granularity").map_or(60, |x| x.parse::<i64>().unwrap());
     let window_size = matches.value_of("ema").map_or(12.0, |x| x.parse::<f64>().unwrap());
+    let rsi_buy = matches.value_of("RSI-BUY").map(|x| x.parse::<f64>().unwrap()).unwrap();
+    let rsi_sell = matches.value_of("RSI-SELL").map(|x| x.parse::<f64>().unwrap()).unwrap();
+
+    if rsi_buy >= rsi_sell {
+        error!("Are you trying to lose your money?");
+        panic!("Buy low sell high not the other way around")
+    }
 
     let secret = "zTfIRWZepcUnWQBAt8AXn57+YiPFTwCHh2gipTlCkM4A1Qx17NFI+/wzB9FEoXiWNV+4BsbqMFdM46/1SOJ0hQ==";
     let pass = "mk3nv587pqf";
@@ -53,12 +83,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (mut ticker_tx, mut ticker_rx) = mpsc::channel(10000);
     let (mut price_tx, mut price_rx) = mpsc::channel(10000);
     let (mut rsi_tx, mut rsi_rx) = mpsc::channel(10000);
-
-    // wait for program to get in sync with time
-/*     let now = Utc::now().second() % 60;
-    println!("{}", now);
-    info!("syncing time down to the minute");
-    tokio::time::delay_for(Duration::from_secs(now as u64)).await; */
 
     tokio::spawn(async move {
         if let Err(e) = connection.await {
@@ -472,7 +496,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     (String::from(init_side), None)
                 };
 
-                if rsi < 75.0 && side == "sell" {
+                if rsi <= rsi_buy && side == "sell" {
                     let size = 500.0 / ask;
                     let dp = 10.0_f64.powi(8);
                     let size = (size * dp).round() / dp;
@@ -498,7 +522,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         return;
                     }
 
-                } else if rsi > 75.0 && side == "buy" {
+                } else if rsi >= rsi_sell && side == "buy" {
                     let uuid = Uuid::new_v4();
                     let client_oid = uuid.to_hyphenated().to_string();
                     let side: &'static str = "sell";
