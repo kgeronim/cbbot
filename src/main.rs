@@ -4,7 +4,7 @@ use tokio::sync::mpsc;
 use clap::{Arg, App};
 use log::{error, info, warn, Level};
 use tokio_postgres::{types::ToSql, NoTls};
-use chrono::{DateTime, Timelike, Datelike, Utc, NaiveDateTime Duration};
+use chrono::{DateTime, Timelike, Datelike, Utc, NaiveDateTime, Duration};
 use std::{sync::Arc, collections::VecDeque, iter::Iterator};
 use cbpro::{
     websocket::{Channels, WebSocketFeed, SANDBOX_FEED_URL},
