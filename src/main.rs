@@ -1,10 +1,10 @@
 use uuid::Uuid;
 use futures::StreamExt;
-use tokio::sync::mpsc;
+use tokio::{sync::mpsc, time::{Duration, Instant}};
 use clap::{Arg, App};
 use log::{error, info, warn, debug, Level};
 use tokio_postgres::{types::ToSql, NoTls};
-use chrono::{DateTime, Timelike, Utc, NaiveDateTime};
+use chrono::{DateTime, Timelike, Datelike, Utc, NaiveDateTime};
 use std::{sync::Arc, collections::VecDeque, iter::Iterator};
 use cbpro::{
     websocket::{Channels, WebSocketFeed, WEBSOCKET_FEED_URL},
@@ -25,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                           .get_matches();
 
-    simple_logger::init_with_level(Level::Debug).unwrap();
+    simple_logger::init_with_level(Level::Info).unwrap();
     let granularity = matches.value_of("granularity").map_or(60, |x| x.parse::<i64>().unwrap());
 
     let secret = "zTfIRWZepcUnWQBAt8AXn57+YiPFTwCHh2gipTlCkM4A1Qx17NFI+/wzB9FEoXiWNV+4BsbqMFdM46/1SOJ0hQ==";
@@ -49,6 +49,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (mut ticker_tx, mut ticker_rx) = mpsc::channel(10000);
     let (mut price_tx, mut price_rx) = mpsc::channel(10000);
     let (mut rsi_tx, mut rsi_rx) = mpsc::channel(10000);
+
+    // wait for program to get in sync with time
+/*     let now = Utc::now().second() % 60;
+    println!("{}", now);
+    info!("syncing time down to the minute");
+    tokio::time::delay_for(Duration::from_secs(now as u64)).await; */
 
     tokio::spawn(async move {
         if let Err(e) = connection.await {
@@ -83,7 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     db_client.simple_query(
             "CREATE TABLE candle (
                 id      SERIAL PRIMARY KEY,
-                time    TIMESTAMP WITH TIME ZONE NOT NULL,
+                time    TIMESTAMP WITH TIME ZONE UNIQUE NOT NULL,
                 open    FLOAT NOT NULL,
                 high    FLOAT NOT NULL,
                 low     FLOAT NOT NULL,
@@ -149,6 +155,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let best_ask = v["best_ask"].as_str().unwrap().parse::<f64>().unwrap();
                     let custom_time = time.naive_utc().with_second(0).unwrap().with_nanosecond(0).unwrap();
 
+                    let total_seconds = time.day0() * 86400 + time.hour() * 3600 + time.minute() * 60;
+                    let custom_time = custom_time - chrono::Duration::seconds(total_seconds as i64 % granularity);
+
                     if let Err(_) = ticker_tx.send((custom_time, price, last_size, (best_bid, best_ask))).await {
                         error!("receiver dropped");
                         return;
@@ -204,7 +213,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let mut bucket: Vec<(f64, f64, NaiveDateTime)> = Vec::new();
 
-        let end = chrono::offset::Utc::now();
+        let end = Utc::now() - chrono::Duration::seconds(granularity - 30);
         let start = end - chrono::Duration::seconds(300 * granularity);
         let rates = match cb_client1.public()
         .get_historic_rates("BTC-USD", granularity as i32).range(start, end).json().await {
@@ -250,9 +259,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let first_tick = bucket.iter().map(|t| t.2).next();
             
             if let Some(first_tick) = first_tick {
-                debug!("bucket start time: {:?}", first_tick);
+                info!("bucket start time: {:?}", first_tick);
+                let elapsed_time = chrono::Duration::seconds(granularity);
 
-                if time - first_tick == chrono::Duration::seconds(granularity) {
+                if time - first_tick == elapsed_time {
                     let open = bucket.iter().map(|t| t.0).next().unwrap_or(0./0.);
                     let high = bucket.iter().map(|t| t.0).fold(0./0., f64::max);
                     let low = bucket.iter().map(|t| t.0).fold(0./0., f64::min);
