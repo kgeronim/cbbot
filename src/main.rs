@@ -354,8 +354,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     
                     let params: &[&(dyn ToSql + Sync)] = &[&bucket_time, &open, &high, &low, &close, &volume];
-                    if let Err(e) = db_candle_client.execute(&statement, params).await {
-                        error!("{:?}", e);
+                    if let Err(_) = db_candle_client.execute(&statement, params).await {
+                        error!("Unable to sync please try again");
                         return;
                     }
                     
