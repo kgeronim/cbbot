@@ -4,7 +4,7 @@ use tokio::sync::mpsc;
 use clap::{Arg, App};
 use log::{error, info, warn, Level};
 use tokio_postgres::{types::ToSql, NoTls};
-use chrono::{DateTime, Timelike, Datelike, Utc, NaiveDateTime};
+use chrono::{DateTime, Timelike, Datelike, Utc, NaiveDateTime Duration};
 use std::{sync::Arc, collections::VecDeque, iter::Iterator};
 use cbpro::{
     websocket::{Channels, WebSocketFeed, SANDBOX_FEED_URL},
@@ -156,7 +156,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let custom_time = time.naive_utc().with_second(0).unwrap().with_nanosecond(0).unwrap();
 
                     let total_seconds = time.day0() * 86400 + time.hour() * 3600 + time.minute() * 60;
-                    let custom_time = custom_time - chrono::Duration::seconds(total_seconds as i64 % granularity);
+                    let custom_time = custom_time - Duration::seconds(total_seconds as i64 % granularity);
 
                     if let Err(_) = ticker_tx.send((custom_time, price, last_size, (best_bid, best_ask))).await {
                         error!("receiver dropped");
@@ -213,8 +213,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let mut bucket: Vec<(f64, f64, NaiveDateTime)> = Vec::new();
 
-        let end = Utc::now() - chrono::Duration::seconds(granularity - 30);
-        let start = end - chrono::Duration::seconds(300 * granularity);
+        let end = Utc::now() - Duration::seconds(granularity - 30);
+        let start = end - Duration::seconds(300 * granularity);
         let rates = match cb_client1.public()
         .get_historic_rates("BTC-USD", granularity as i32).range(start, end).json().await {
             Ok(rates) => rates,
@@ -254,13 +254,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }    
         }
 
+        let elapsed_time = Duration::seconds(granularity);
         while let Some((time, price, size, (bid, ask))) = ticker_rx.recv().await {
             
             let first_tick = bucket.iter().map(|t| t.2).next();
             
             if let Some(first_tick) = first_tick {
                 info!("bucket start time: {:?}", first_tick);
-                let elapsed_time = chrono::Duration::seconds(granularity);
 
                 if time - first_tick == elapsed_time {
                     let open = bucket.iter().map(|t| t.0).next().unwrap_or(0./0.);
