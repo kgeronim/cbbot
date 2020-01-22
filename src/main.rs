@@ -1,36 +1,38 @@
 use uuid::Uuid;
 use futures::StreamExt;
 use tokio::sync::mpsc;
-use clap::{Arg, App, SubCommand};
-use log::{error, info, warn, Level};
+use clap::{Arg, App};
+use log::{error, info, warn, debug, Level};
 use tokio_postgres::{types::ToSql, NoTls};
 use chrono::{DateTime, Timelike, Utc, NaiveDateTime};
 use std::{sync::Arc, collections::VecDeque, iter::Iterator};
 use cbpro::{
-    websocket::{Channels, WebSocketFeed, SANDBOX_FEED_URL},
-    client::{AuthenticatedClient, SANDBOX_URL, ORD}
+    websocket::{Channels, WebSocketFeed, WEBSOCKET_FEED_URL},
+    client::{AuthenticatedClient, MAIN_URL, ORD}
 };
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let _ = App::new("myapp")
+    let matches = App::new("myapp")
                           .version("0.1.0")
                           .author("kgeronim <kevin.geronimo@outlook.com>")
                           .about("Coinbase Pro RSI Mean Reversion Trading Bot")
                           .arg(Arg::with_name("granularity")
+                                .short("g")
                                 .long("granularity")
                                 .takes_value(true)
-                                .possible_values(&["1m", "5m", "15m", "30m"]))
+                                .possible_values(&["60", "300", "900", "3600", "21600", "86400"]))
 
                           .get_matches();
 
-    simple_logger::init_with_level(Level::Info).unwrap();
+    simple_logger::init_with_level(Level::Debug).unwrap();
+    let granularity = matches.value_of("granularity").map_or(60, |x| x.parse::<i64>().unwrap());
 
     let secret = "zTfIRWZepcUnWQBAt8AXn57+YiPFTwCHh2gipTlCkM4A1Qx17NFI+/wzB9FEoXiWNV+4BsbqMFdM46/1SOJ0hQ==";
     let pass = "mk3nv587pqf";
     let key = "f9b2fe0ffbc5eb60ca20cbbb5fc94c4d";
 
-    let cb_client = AuthenticatedClient::new(key, pass, secret, SANDBOX_URL);
+    let cb_client = AuthenticatedClient::new(key, pass, secret, MAIN_URL);
     let cb_client = Arc::new(cb_client);
     let cb_client1 = Arc::clone(&cb_client);
     let cb_client2 = Arc::clone(&cb_client);
@@ -44,9 +46,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_ma_client = Arc::clone(&db_client);
     let db_state_client = Arc::clone(&db_client);
 
-    let (mut ticker_tx, mut ticker_rx) = mpsc::channel(100);
-    let (mut price_tx, mut price_rx) = mpsc::channel(100);
-    let (mut rsi_tx, mut rsi_rx) = mpsc::channel(100);
+    let (mut ticker_tx, mut ticker_rx) = mpsc::channel(10000);
+    let (mut price_tx, mut price_rx) = mpsc::channel(10000);
+    let (mut rsi_tx, mut rsi_rx) = mpsc::channel(10000);
 
     tokio::spawn(async move {
         if let Err(e) = connection.await {
@@ -122,7 +124,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)"
         ).await.unwrap();
 
-        let mut feed = match WebSocketFeed::connect(SANDBOX_FEED_URL).await {
+        let mut feed = match WebSocketFeed::connect(WEBSOCKET_FEED_URL).await {
             Ok(feed) => feed,
             Err(e) => {
                 error!("{:?}", e);
@@ -145,8 +147,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let last_size = v["last_size"].as_str().unwrap().parse::<f64>().unwrap();
                     let best_bid = v["best_bid"].as_str().unwrap().parse::<f64>().unwrap();
                     let best_ask = v["best_ask"].as_str().unwrap().parse::<f64>().unwrap();
-                    
-                    if let Err(_) = ticker_tx.send((time, price, last_size, (best_bid, best_ask))).await {
+                    let custom_time = time.naive_utc().with_second(0).unwrap().with_nanosecond(0).unwrap();
+
+                    if let Err(_) = ticker_tx.send((custom_time, price, last_size, (best_bid, best_ask))).await {
                         error!("receiver dropped");
                         return;
                     }
@@ -199,12 +202,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             VALUES ($1, $2, $3, $4, $5, $6)"
         ).await.unwrap();
 
-        let mut bucket: Vec<(f64, f64)> = Vec::new();
-        let mut prev_time: Option<NaiveDateTime> = None;
+        let mut bucket: Vec<(f64, f64, NaiveDateTime)> = Vec::new();
 
         let end = chrono::offset::Utc::now();
-        let start = end - chrono::Duration::minutes(300);
-        let rates = match cb_client1.public().get_historic_rates("BTC-USD", 60).range(start, end).json().await {
+        let start = end - chrono::Duration::seconds(300 * granularity);
+        let rates = match cb_client1.public()
+        .get_historic_rates("BTC-USD", granularity as i32).range(start, end).json().await {
             Ok(rates) => rates,
             Err(e) => {
                 error!("{:?}", e);
@@ -235,29 +238,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            if let Err(e) = db_candle_client.execute(&statement, &[&time, &open, &high, &low, &close, &volume]).await {
+            let params: &[&(dyn ToSql + Sync)] = &[&time, &open, &high, &low, &close, &volume];
+            if let Err(e) = db_candle_client.execute(&statement, params).await {
                 error!("{:?}", e);
                 return;
             }    
         }
 
         while let Some((time, price, size, (bid, ask))) = ticker_rx.recv().await {
-            if let Some(prev_time) = prev_time {  
-                if time.naive_utc().minute() == prev_time.minute() + 1 {
+            
+            let first_tick = bucket.iter().map(|t| t.2).next();
+            
+            if let Some(first_tick) = first_tick {
+                debug!("bucket start time: {:?}", first_tick);
+
+                if time - first_tick == chrono::Duration::seconds(granularity) {
                     let open = bucket.iter().map(|t| t.0).next().unwrap_or(0./0.);
                     let high = bucket.iter().map(|t| t.0).fold(0./0., f64::max);
                     let low = bucket.iter().map(|t| t.0).fold(0./0., f64::min);
                     let close = bucket.iter().map(|t| t.0).last().unwrap_or(0./0.);
                     let volume: f64 = bucket.iter().map(|t| t.1).sum();
-
-                    let bucket_time = prev_time
-                        .with_second(0)
-                        .unwrap()
-                        .with_nanosecond(0)
-                        .unwrap();
-
-                    let bucket_time = DateTime::<Utc>::from_utc(bucket_time, Utc);
-
+                    
+                    let bucket_time = DateTime::<Utc>::from_utc(first_tick, Utc);
                     
                     if (close - open).is_sign_positive() {
                         if let Err(_) = price_tx.send((bucket_time, close, "gain", ("new", bid, ask))).await {
@@ -270,20 +272,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             return;
                         }
                     }
-
-                    if let Err(e) = db_candle_client.execute(&statement, &[&bucket_time, &open, &high, &low, &close, &volume]).await {
+                    
+                    let params: &[&(dyn ToSql + Sync)] = &[&bucket_time, &open, &high, &low, &close, &volume];
+                    if let Err(e) = db_candle_client.execute(&statement, params).await {
                         error!("{:?}", e);
                         return;
                     }
-
+                    
                     (&mut bucket).clear();
                 }
             }
             
-            prev_time = Some(time.naive_utc());
-            bucket.push((price, size));
+            bucket.push((price, size, time));
         }
-
+        
     });
 
     tokio::spawn(async move {
@@ -399,13 +401,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let id: i32 = 1;
         let init_side: &'static str = "sell";
 
-        if let Err(e) = db_state_client.execute(&init_statement, &[&id, &init_side, &None::<f64>, &None::<Uuid>]).await {
+        let params: &[&(dyn ToSql + Sync)] = &[&id, &init_side, &None::<f64>, &None::<Uuid>];
+        if let Err(e) = db_state_client.execute(&init_statement, params).await {
             error!("{:?}", e);
             return;
         }
 
         while let Some(status) = rsi_rx.recv().await {
-            if let (Some(rsi), ("new", bid, ask)) = status {
+/*             if let (Some(rsi), ("new", bid, ask)) = status {
 
                 let (side, size, uuid): (String, Option<f64>, Option<Uuid>) = match db_state_client.query_one(&statement, &[]).await {
                     Ok(row) => (row.get("side"), row.get("size"), row.get("client_oid")),
@@ -512,7 +515,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         return;
                     }
                 };
-            }
+            } */
         }
     }).await?;
 
