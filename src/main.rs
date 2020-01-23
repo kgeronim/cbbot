@@ -76,41 +76,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         panic!()
     }
 
-    let secret = match std::option_env!("CBPRO_SECRET") {
-        Some(val) => val,
-        None => {
+    let secret = match std::env::var("CBPRO_SECRET") {
+        Ok(val) => val,
+        Err(_) => {
             error!("CBPRO_SECRET environment variable required");
             panic!() 
         }
     };
 
-    let pass = match std::option_env!("CBPRO_PASSPHRASE") {
-        Some(val) => val,
-        None => {
+    let pass = match std::env::var("CBPRO_PASSPHRASE") {
+        Ok(val) => val,
+        Err(_) => {
             error!("CBPRO_PASSPHRASE environment variable required");
             panic!() 
         }
     };
 
-    let key = match std::option_env!("CBPRO_KEY") {
-        Some(val) => val,
-        None => {
+    let key = match std::env::var("CBPRO_KEY") {
+        Ok(val) => val,
+        Err(_) => {
             error!("CBPRO_KEY environment variable required");
             panic!() 
         }
     };
 
-    let user = match std::option_env!("POSTGRES_USER") {
-        Some(val) => val,
-        None => {
+    let user = match std::env::var("POSTGRES_USER") {
+        Ok(val) => val,
+        Err(_) => {
             error!("POSTGRES_USER environment variable required");
             panic!() 
         }
     };
 
-    let password = match std::option_env!("POSTGRES_PASSWORD") {
-        Some(val) => val,
-        None => {
+    let password = match std::env::var("POSTGRES_PASSWORD") {
+        Ok(val) => val,
+        Err(_) => {
             error!("POSTGRES_PASSWORD environment variable required");
             panic!() 
         }
