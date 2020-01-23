@@ -76,9 +76,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         panic!()
     }
 
-    let secret = "zTfIRWZepcUnWQBAt8AXn57+YiPFTwCHh2gipTlCkM4A1Qx17NFI+/wzB9FEoXiWNV+4BsbqMFdM46/1SOJ0hQ==";
-    let pass = "mk3nv587pqf";
-    let key = "f9b2fe0ffbc5eb60ca20cbbb5fc94c4d";
+    let secret = match std::option_env!("CBPRO_SECRET") {
+        Some(val) => val,
+        None => {
+            error!("CBPRO_SECRET environment variable required");
+            panic!() 
+        }
+    };
+
+    let pass = match std::option_env!("CBPRO_PASSPHRASE") {
+        Some(val) => val,
+        None => {
+            error!("CBPRO_PASSPHRASE environment variable required");
+            panic!() 
+        }
+    };
+
+    let key = match std::option_env!("CBPRO_KEY") {
+        Some(val) => val,
+        None => {
+            error!("CBPRO_KEY environment variable required");
+            panic!() 
+        }
+    };
+
+    let user = match std::option_env!("POSTGRES_USER") {
+        Some(val) => val,
+        None => {
+            error!("POSTGRES_USER environment variable required");
+            panic!() 
+        }
+    };
+
+    let password = match std::option_env!("POSTGRES_PASSWORD") {
+        Some(val) => val,
+        None => {
+            error!("POSTGRES_PASSWORD environment variable required");
+            panic!() 
+        }
+    };
 
     let cb_client = AuthenticatedClient::new(key, pass, secret, SANDBOX_URL);
     let cb_client = Arc::new(cb_client);
@@ -92,7 +128,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let products = products.as_array().unwrap();
     let mut products = products.iter().filter(|x| product_id == x["id"].as_str().unwrap());
-    if let None = products.next() {
+    if let Some(_) = products.next() {
+        if !product_id.contains("USD") {
+            error!("Only USD trading pairs allowed. e.g., BTC-USD or LTC-USD ");
+            panic!()
+        }
+    } else {
         error!("PRODUCT-ID not found");
         panic!()
     }
@@ -108,8 +149,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    let connection_string = format!("host=timescaledb user={} password={}", user, password);
     let (db_client, connection) =
-        tokio_postgres::connect("host=timescaledb user=postgres password=test123", NoTls).await?;
+        tokio_postgres::connect(&connection_string, NoTls).await?;
     
     let db_client = Arc::new(db_client);
     let db_ticker_client = Arc::clone(&db_client);
