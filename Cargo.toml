@@ -1,5 +1,5 @@
 [package]
-name = "cbpro-rsi-bot"
+name = "cbbot"
 version = "0.1.0"
 authors = ["kgeronim <kevin.geronimo@outlook.com>"]
 edition = "2018"

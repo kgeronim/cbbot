@@ -1,9 +1,9 @@
 use uuid::Uuid;
 use futures::{StreamExt, join};
-use tokio::sync::mpsc;
 use clap::{Arg, App};
 use log::{error, info, warn, debug, Level};
 use tokio_postgres::{types::ToSql, NoTls};
+use tokio::{sync::mpsc, io::AsyncReadExt, fs::File};
 use chrono::{DateTime, Timelike, Datelike, Utc, NaiveDateTime, Duration};
 use std::{sync::Arc, collections::VecDeque, iter::Iterator};
 use cbpro::{
@@ -76,42 +76,80 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         panic!()
     }
 
-    let secret = match std::env::var("CBPRO_SECRET") {
-        Ok(val) => val,
-        Err(_) => {
+    let secret = if let Ok(val) = std::env::var("CBPRO_SECRET") {
+        val
+    } else {
+        if let Ok(mut f) = File::open("/run/secrets/cb_secret").await {
+            let mut buffer = String::new();
+            f.read_to_string(&mut buffer).await?;
+            buffer
+        } else {
             error!("CBPRO_SECRET environment variable required");
             panic!() 
         }
     };
 
-    let pass = match std::env::var("CBPRO_PASSPHRASE") {
-        Ok(val) => val,
-        Err(_) => {
+    let pass = if let Ok(val) = std::env::var("CBPRO_PASSPHRASE") {
+        val
+    } else {
+        if let Ok(mut f) = File::open("/run/secrets/cb_pass").await {
+            let mut buffer = String::new();
+            f.read_to_string(&mut buffer).await?;
+            buffer
+        } else {
             error!("CBPRO_PASSPHRASE environment variable required");
             panic!() 
         }
     };
 
-    let key = match std::env::var("CBPRO_KEY") {
-        Ok(val) => val,
-        Err(_) => {
+    let key = if let Ok(val) = std::env::var("CBPRO_KEY") {
+        val
+    } else {
+        if let Ok(mut f) = File::open("/run/secrets/cb_key").await {
+            let mut buffer = String::new();
+            f.read_to_string(&mut buffer).await?;
+            buffer
+        } else {
             error!("CBPRO_KEY environment variable required");
             panic!() 
         }
     };
 
-    let user = match std::env::var("POSTGRES_USER") {
-        Ok(val) => val,
-        Err(_) => {
+    let user = if let Ok(val) = std::env::var("POSTGRES_USER") {
+        val
+    } else {
+        if let Ok(mut f) = File::open("/run/secrets/pg_user").await {
+            let mut buffer = String::new();
+            f.read_to_string(&mut buffer).await?;
+            buffer
+        } else {
             error!("POSTGRES_USER environment variable required");
             panic!() 
         }
     };
 
-    let password = match std::env::var("POSTGRES_PASSWORD") {
-        Ok(val) => val,
-        Err(_) => {
+    let password = if let Ok(val) = std::env::var("POSTGRES_PASSWORD") {
+        val
+    } else {
+        if let Ok(mut f) = File::open("/run/secrets/pg_password").await {
+            let mut buffer = String::new();
+            f.read_to_string(&mut buffer).await?;
+            buffer
+        } else {
             error!("POSTGRES_PASSWORD environment variable required");
+            panic!() 
+        }
+    };
+
+    let db = if let Ok(val) = std::env::var("POSTGRES_DB") {
+        val
+    } else {
+        if let Ok(mut f) = File::open("/run/secrets/pg_database").await {
+            let mut buffer = String::new();
+            f.read_to_string(&mut buffer).await?;
+            buffer
+        } else {
+            error!("POSTGRES_DB environment variable required");
             panic!() 
         }
     };
@@ -149,7 +187,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let connection_string = format!("host=timescaledb user={} password={}", user, password);
+    let connection_string = format!("host=timescaledb user={} password={} dbname={}", user, password, db);
     let (db_client, connection) =
         tokio_postgres::connect(&connection_string, NoTls).await?;
     
@@ -595,7 +633,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .json()
                         .await;
 
-                    info!("buy limit order, client_oid: {}, price: {}, size: {}", client_oid, ask, size);
+                    info!("buy limit order, client_oid: {}, price: {}, size: {}, rsi: {}", client_oid, ask, size, rsi);
                     if let Err(e) = response {
                         error!("{:?}", e);
                         return;
@@ -625,7 +663,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .json()
                         .await;
 
-                    info!("sell limit order, client_oid: {}, price: {}, size: {}", client_oid, bid, size);
+                    info!("sell limit order, client_oid: {}, price: {}, size: {}, rsi: {}", client_oid, bid, size, rsi);
                     if let Err(e) = response {
                         error!("{:?}", e);
                         return;
