@@ -1,5 +1,5 @@
 use uuid::Uuid;
-use futures::{StreamExt, join};
+use futures::{StreamExt, try_join};
 use clap::{Arg, App};
 use log::{error, info, warn, debug, Level};
 use tokio_postgres::{types::ToSql, NoTls};
@@ -178,8 +178,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let products = cb_client.public().get_products().json();
     let accounts = cb_client.list_accounts().json();
-    let (products, accounts) = join!(products, accounts);
-    let (products, accounts) = (products?, accounts?);
+    let (products, accounts) = try_join!(products, accounts)?;
 
     let products = products.as_array().unwrap();
     let mut products = products.iter().filter(|x| product_id == x["id"].as_str().unwrap());
@@ -224,11 +223,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    db_client.simple_query("DROP TABLE IF EXISTS ticker;").await?;
-    db_client.simple_query("DROP TABLE IF EXISTS candle;").await?;
-    db_client.simple_query("DROP TABLE IF EXISTS moving_average;").await?;
+    let drop_ticker = db_client.simple_query("DROP TABLE IF EXISTS ticker;");
+    let drop_candle = db_client.simple_query("DROP TABLE IF EXISTS candle;");
+    let drop_ma = db_client.simple_query("DROP TABLE IF EXISTS moving_average;");
 
-    db_client.simple_query(
+    let create_ticker = db_client.simple_query(
             "CREATE TABLE ticker (
                 trade_id    INT PRIMARY KEY,
                 type        VARCHAR (50) NOT NULL,
@@ -246,9 +245,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 volume_24h  FLOAT NOT NULL,
                 volume_30d  FLOAT NOT NULL
             )"
-        ).await?;
+        );
 
-    db_client.simple_query(
+    let create_candle = db_client.simple_query(
             "CREATE TABLE candle (
                 id      SERIAL PRIMARY KEY,
                 time    TIMESTAMP WITH TIME ZONE UNIQUE NOT NULL,
@@ -258,9 +257,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 close   FLOAT NOT NULL,
                 volume  FLOAT NOT NULL
             )"
-        ).await?;
+        );
 
-    db_client.simple_query(
+    let create_ma = db_client.simple_query(
         "CREATE TABLE moving_average (
             id          SERIAL PRIMARY KEY,
             time        TIMESTAMP WITH TIME ZONE NOT NULL,
@@ -271,18 +270,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             losses_ema  FLOAT,
             rsi         FLOAT
         )"
-    ).await?;
+    );
 
-    db_client.simple_query(
+    let create_state = db_client.simple_query(
         "CREATE TABLE IF NOT EXISTS state (
             id          INT PRIMARY KEY,
             side        VARCHAR (50) NOT NULL,
             size        FLOAT,
             client_oid  UUID
         )"
-    ).await?;
+    );
 
-    tokio::spawn(async move {
+    try_join!(
+        drop_ticker,
+        drop_candle,
+        drop_ma,
+        create_ticker,
+        create_candle,
+        create_ma,
+        create_state
+    )?;
+
+    let ticker_handle = tokio::spawn(async move {
         let statement = db_ticker_client.prepare(
             "INSERT INTO ticker (
                 trade_id, type, sequence, 
@@ -299,6 +308,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return;
             }
         };
+        debug!("feed response: {:?}", feed.response());
 
         let product_ids = [&product_id1[..]];
         if let Err(e) = feed.subscribe(&product_ids[..], &[Channels::TICKER]).await {
@@ -372,7 +382,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    tokio::spawn(async move {
+    let candle_handle = tokio::spawn(async move {
         let statement = db_candle_client.prepare(
             "INSERT INTO candle (time, open, high, low, close, volume) 
             VALUES ($1, $2, $3, $4, $5, $6)"
@@ -465,7 +475,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         
     });
 
-    tokio::spawn(async move {
+    let ma_handle = tokio::spawn(async move {
         let statement = db_ma_client.prepare(
             "INSERT INTO moving_average (time, close, sma, ema, gains_ema, losses_ema, rsi) 
             VALUES ($1, $2, $3, $4, $5, $6, $7)"
@@ -561,7 +571,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // trading starts here
-    tokio::spawn(async move {
+    let trade_handle = tokio::spawn(async move {
         let init_statement = db_state_client.prepare(
             "INSERT INTO state (id, side, size, client_oid) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING"
         ).await.unwrap();
@@ -692,7 +702,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
             }
         }
-    }).await?;
+    });
+
+    if let Err(e) = try_join!(ticker_handle, candle_handle, ma_handle, trade_handle) {
+        error!("{:?}", e);
+        panic!()
+    }
 
     Ok(())
 }
