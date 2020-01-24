@@ -7,8 +7,8 @@ use tokio::{sync::mpsc, io::AsyncReadExt, fs::File};
 use chrono::{DateTime, Timelike, Datelike, Utc, NaiveDateTime, Duration};
 use std::{sync::Arc, collections::VecDeque, iter::Iterator};
 use cbpro::{
-    websocket::{Channels, WebSocketFeed, SANDBOX_FEED_URL},
-    client::{AuthenticatedClient, SANDBOX_URL, ORD}
+    websocket::{Channels, WebSocketFeed, SANDBOX_FEED_URL, MAIN_FEED_URL},
+    client::{AuthenticatedClient, SANDBOX_URL, MAIN_URL, ORD}
 };
 
 fn validator(x: String) -> Result<(), String> {
@@ -57,9 +57,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .required(true)
             .index(4)
             .validator(validator))
+        .arg(Arg::with_name("debug")
+            .short("d")
+            .help("Print debug information verbosely"))
+        .arg(Arg::with_name("sandbox")
+            .long("sandbox")
+            .help("Connect to https://public.sandbox.pro.coinbase.com/"))
         .get_matches();
 
-    simple_logger::init_with_level(Level::Info).unwrap();
+    if matches.is_present("debug") {
+        simple_logger::init_with_level(Level::Debug).unwrap();
+    } else {
+        simple_logger::init_with_level(Level::Info).unwrap();
+    }
+
     let granularity = matches.value_of("granularity").map_or(60, |x| x.parse::<i64>().unwrap());
     let window_size = matches.value_of("ema").map_or(12.0, |x| x.parse::<f64>().unwrap());
     let position = matches.value_of("POSITION").map(|x| x.parse::<f64>().unwrap()).unwrap();
@@ -154,7 +165,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let cb_client = AuthenticatedClient::new(key, pass, secret, SANDBOX_URL);
+    let (cb_url, feed_url) = if matches.is_present("sandbox") {
+        (SANDBOX_URL, SANDBOX_FEED_URL)
+    } else {
+        (MAIN_URL, MAIN_FEED_URL)
+    };
+
+    let cb_client = AuthenticatedClient::new(key.clone(), pass.clone(), secret.clone(), cb_url);
     let cb_client = Arc::new(cb_client);
     let cb_client1 = Arc::clone(&cb_client);
     let cb_client2 = Arc::clone(&cb_client);
@@ -275,7 +292,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)"
         ).await.unwrap();
 
-        let mut feed = match WebSocketFeed::connect(SANDBOX_FEED_URL).await {
+        let mut feed = match WebSocketFeed::connect_auth(key, pass, secret, feed_url).await {
             Ok(feed) => feed,
             Err(e) => {
                 error!("{:?}", e);
@@ -310,7 +327,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let custom_time = custom_time - Duration::seconds(total_seconds as i64 % granularity);
 
                     if let Err(_) = ticker_tx.send((custom_time, price, last_size, (best_bid, best_ask))).await {
-                        error!("receiver dropped");
+                        error!("ticker receiver dropped");
                         return;
                     }
                     
@@ -600,8 +617,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             } else {
                                 continue
                             }
-                            
-                        }
+                        },
                         Err(_) => {
                             warn!("Limit {} order cancelled, client_oid: {}", side, client_oid);
                             if side == "sell" {
