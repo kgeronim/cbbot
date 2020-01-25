@@ -93,7 +93,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Ok(mut f) = File::open("/run/secrets/cb_secret").await {
             let mut buffer = String::new();
             f.read_to_string(&mut buffer).await?;
-            buffer
+            buffer.trim().to_owned()
         } else {
             error!("CBPRO_SECRET environment variable required");
             panic!() 
@@ -106,7 +106,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Ok(mut f) = File::open("/run/secrets/cb_pass").await {
             let mut buffer = String::new();
             f.read_to_string(&mut buffer).await?;
-            buffer
+            buffer.trim().to_owned()
         } else {
             error!("CBPRO_PASSPHRASE environment variable required");
             panic!() 
@@ -119,7 +119,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Ok(mut f) = File::open("/run/secrets/cb_key").await {
             let mut buffer = String::new();
             f.read_to_string(&mut buffer).await?;
-            buffer
+            buffer.trim().to_owned()
         } else {
             error!("CBPRO_KEY environment variable required");
             panic!() 
@@ -132,7 +132,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Ok(mut f) = File::open("/run/secrets/pg_user").await {
             let mut buffer = String::new();
             f.read_to_string(&mut buffer).await?;
-            buffer
+            buffer.trim().to_owned()
         } else {
             error!("POSTGRES_USER environment variable required");
             panic!() 
@@ -145,7 +145,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Ok(mut f) = File::open("/run/secrets/pg_password").await {
             let mut buffer = String::new();
             f.read_to_string(&mut buffer).await?;
-            buffer
+            buffer.trim().to_owned()
         } else {
             error!("POSTGRES_PASSWORD environment variable required");
             panic!() 
@@ -158,7 +158,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Ok(mut f) = File::open("/run/secrets/pg_database").await {
             let mut buffer = String::new();
             f.read_to_string(&mut buffer).await?;
-            buffer
+            buffer.trim().to_owned()
         } else {
             error!("POSTGRES_DB environment variable required");
             panic!() 
