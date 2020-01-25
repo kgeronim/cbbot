@@ -103,7 +103,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pass = if let Ok(val) = std::env::var("CBPRO_PASSPHRASE") {
         val
     } else {
-        if let Ok(mut f) = File::open("/run/secrets/cb_pass").await {
+        if let Ok(mut f) = File::open("/run/secrets/cb_passphrase").await {
             let mut buffer = String::new();
             f.read_to_string(&mut buffer).await?;
             buffer.trim().to_owned()
@@ -126,19 +126,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let user = if let Ok(val) = std::env::var("POSTGRES_USER") {
-        val
-    } else {
-        if let Ok(mut f) = File::open("/run/secrets/pg_user").await {
-            let mut buffer = String::new();
-            f.read_to_string(&mut buffer).await?;
-            buffer.trim().to_owned()
-        } else {
-            error!("POSTGRES_USER environment variable required");
-            panic!() 
-        }
-    };
-
     let password = if let Ok(val) = std::env::var("POSTGRES_PASSWORD") {
         val
     } else {
@@ -148,19 +135,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             buffer.trim().to_owned()
         } else {
             error!("POSTGRES_PASSWORD environment variable required");
-            panic!() 
-        }
-    };
-
-    let db = if let Ok(val) = std::env::var("POSTGRES_DB") {
-        val
-    } else {
-        if let Ok(mut f) = File::open("/run/secrets/pg_database").await {
-            let mut buffer = String::new();
-            f.read_to_string(&mut buffer).await?;
-            buffer.trim().to_owned()
-        } else {
-            error!("POSTGRES_DB environment variable required");
             panic!() 
         }
     };
@@ -203,7 +177,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let connection_string = format!("host=timescaledb user={} password={} dbname={}", user, password, db);
+    let connection_string = format!("host=timescaledb user=postgres password={}", password);
     let (db_client, connection) =
         tokio_postgres::connect(&connection_string, NoTls).await?;
     
@@ -437,7 +411,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let first_tick = bucket.iter().map(|t| t.2).next();
             
             if let Some(first_tick) = first_tick {
-                debug!("bucket start time: {:?}", first_tick);
+                debug!("candle start time: {:?}", first_tick);
 
                 if time - first_tick == elapsed_time {
                     let open = bucket.iter().map(|t| t.0).next().unwrap_or(0./0.);

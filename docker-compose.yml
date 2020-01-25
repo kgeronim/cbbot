@@ -11,11 +11,9 @@ services:
         condition: on-failure
     secrets:
       - cb_secret
-      - cb_pass
+      - cb_passphrase
       - cb_key
-      - pg_user
       - pg_password
-      - pg_database
     command: ["BTC-USD", "500", "65", "75", "-d", "--sandbox"]
 
   timescaledb:
@@ -25,13 +23,9 @@ services:
     ports:
       - 5432:5432
     environment:
-      POSTGRES_USER_FILE: /run/secrets/pg_user
       POSTGRES_PASSWORD_FILE: /run/secrets/pg_password
-      POSTGRES_DB_FILE: /run/secrets/pg_database
     secrets:
-      - pg_user
       - pg_password
-      - pg_database
 
   adminer:
     image: adminer
@@ -44,13 +38,9 @@ volumes:
 secrets:
   cb_secret:
     external: true
-  cb_pass:
+  cb_passphrase:
     external: true
   cb_key:
     external: true
-  pg_user:
-    external: true
   pg_password:
-    external: true
-  pg_database:
     external: true
