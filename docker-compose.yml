@@ -6,7 +6,6 @@ services:
     depends_on:
       - timescaledb
     deploy:
-      replicas: 1
       restart_policy:
         condition: any
     secrets:
@@ -14,7 +13,7 @@ services:
       - cb_passphrase
       - cb_key
       - pg_password
-    command: ["BTC-USD", "500", "65", "75", "-d", "--sandbox"]
+    command: ["BTC-USD", "500", "25", "75", "--sandbox"]
 
   timescaledb:
     image: timescale/timescaledb:latest-pg11
