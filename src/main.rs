@@ -296,7 +296,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let channel_type = v["type"].as_str().unwrap();
 
                     if channel_type != Channels::TICKER {
-                        debug!("skipping channel: {}", channel_type);
+                        info!("skipping channel: {}", channel_type);
                         continue
                     }
 
@@ -411,7 +411,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let first_tick = bucket.iter().map(|t| t.2).next();
             
             if let Some(first_tick) = first_tick {
-                debug!("candle start time: {:?}", first_tick);
 
                 if time - first_tick == elapsed_time {
                     let open = bucket.iter().map(|t| t.0).next().unwrap_or(0./0.);
@@ -462,6 +461,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut window: VecDeque<(f64, &str)> = VecDeque::with_capacity(window_size as usize);
 
         while let Some((time, price, direction, status)) = price_rx.recv().await {
+            info!("previous candle: {:?}", time);
+
             if count == window_size as usize - 1 {
                 window.push_back((price, direction));
 
