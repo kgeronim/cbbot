@@ -630,7 +630,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let response = cb_client2
                         .place_limit_order(&product_id3, side, ask, size)
                         .client_oid(&client_oid)
-                        .cancel_after("min")
+                        .time_in_force("FOK")
                         .json()
                         .await;
 
@@ -660,7 +660,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let response = cb_client2
                         .place_limit_order(&product_id3, side, bid, size)
                         .client_oid(&client_oid)
-                        .cancel_after("min")
+                        .time_in_force("FOK")
                         .json()
                         .await;
 
