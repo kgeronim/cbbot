@@ -1,688 +1,188 @@
-use uuid::Uuid;
-use futures::{StreamExt, try_join};
-use clap::{Arg, App};
-use log::{error, info, warn, debug, Level};
+use futures::stream::StreamExt;
 use tokio_postgres::{types::ToSql, NoTls};
-use tokio::{sync::mpsc, io::AsyncReadExt, fs::File};
-use chrono::{DateTime, Timelike, Datelike, Utc, NaiveDateTime, Duration};
-use std::{sync::Arc, collections::VecDeque, iter::Iterator};
-use cbpro::{
-    websocket::{Channels, WebSocketFeed, SANDBOX_FEED_URL, MAIN_FEED_URL},
-    client::{AuthenticatedClient, SANDBOX_URL, MAIN_URL, ORD}
-};
-
-fn validator(x: String) -> Result<(), String> {
-    if let Ok(x) = x.parse::<u32>() {
-        if x <= 100 {
-            Ok(())
-        } else {
-            Err(String::from("value has to be between 0-100"))
-        }
-    } else {
-        Err(String::from("value has to be between 0-100"))
-    }
-}
+use futures::try_join;
+use chrono::{DateTime, Utc};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    
-    let matches = App::new("cbpro-rsi-bot")
-        .version("0.1.0")
-        .author("kgeronim <kevin.geronimo@outlook.com>")
-        .about("Coinbase Pro RSI Mean Reversion Trading Bot")
-        .arg(Arg::with_name("granularity")
-            .short("g")
-            .long("granularity")
-            .takes_value(true)
-            .possible_values(&["60", "300", "900", "3600", "21600", "86400"]))
-        .arg(Arg::with_name("ema")
-            .long("ema")
-            .takes_value(true)
-            .possible_values(&["12", "26"]))
-        .arg(Arg::with_name("PRODUCT-ID")
-            .help("Trading pair that will be used for trading")
-            .required(true)
-            .index(1))
-        .arg(Arg::with_name("POSITION")
-            .help("USD funds to take position with")
-            .required(true)
-            .index(2))
-        .arg(Arg::with_name("RSI-BUY")
-            .help("Buy at or above the provided rsi")
-            .required(true)
-            .index(3)
-            .validator(validator))
-        .arg(Arg::with_name("RSI-SELL")
-            .help("Sell at or below the provided rsi")
-            .required(true)
-            .index(4)
-            .validator(validator))
-        .arg(Arg::with_name("debug")
-            .short("d")
-            .help("Print debug information verbosely"))
-        .arg(Arg::with_name("sandbox")
-            .long("sandbox")
-            .help("Connect to https://public.sandbox.pro.coinbase.com/"))
-        .get_matches();
 
-    if matches.is_present("debug") {
-        simple_logger::init_with_level(Level::Debug).unwrap();
-    } else {
-        simple_logger::init_with_level(Level::Info).unwrap();
-    }
-
-    let granularity = matches.value_of("granularity").map_or(60, |x| x.parse::<i64>().unwrap());
-    let window_size = matches.value_of("ema").map_or(12.0, |x| x.parse::<f64>().unwrap());
-    let position = matches.value_of("POSITION").map(|x| x.parse::<f64>().unwrap()).unwrap();
-    let rsi_buy = matches.value_of("RSI-BUY").map(|x| x.parse::<f64>().unwrap()).unwrap();
-    let rsi_sell = matches.value_of("RSI-SELL").map(|x| x.parse::<f64>().unwrap()).unwrap();
-    let product_id = String::from(matches.value_of("PRODUCT-ID").unwrap());
-
-    let product_id1 = product_id.clone();
-    let product_id2 = product_id.clone();
-    let product_id3 = product_id.clone();
-    
-    if rsi_buy >= rsi_sell {
-        error!("Buy low sell high not the other way around...");
-        panic!()
-    }
-
-    let secret = if let Ok(val) = std::env::var("CBPRO_SECRET") {
-        val
-    } else {
-        if let Ok(mut f) = File::open("/run/secrets/cb_secret").await {
-            let mut buffer = String::new();
-            f.read_to_string(&mut buffer).await?;
-            buffer.trim().to_owned()
-        } else {
-            error!("CBPRO_SECRET environment variable required");
-            panic!() 
-        }
-    };
-
-    let pass = if let Ok(val) = std::env::var("CBPRO_PASSPHRASE") {
-        val
-    } else {
-        if let Ok(mut f) = File::open("/run/secrets/cb_passphrase").await {
-            let mut buffer = String::new();
-            f.read_to_string(&mut buffer).await?;
-            buffer.trim().to_owned()
-        } else {
-            error!("CBPRO_PASSPHRASE environment variable required");
-            panic!() 
-        }
-    };
-
-    let key = if let Ok(val) = std::env::var("CBPRO_KEY") {
-        val
-    } else {
-        if let Ok(mut f) = File::open("/run/secrets/cb_key").await {
-            let mut buffer = String::new();
-            f.read_to_string(&mut buffer).await?;
-            buffer.trim().to_owned()
-        } else {
-            error!("CBPRO_KEY environment variable required");
-            panic!() 
-        }
-    };
-
-    let password = if let Ok(val) = std::env::var("POSTGRES_PASSWORD") {
-        val
-    } else {
-        if let Ok(mut f) = File::open("/run/secrets/pg_password").await {
-            let mut buffer = String::new();
-            f.read_to_string(&mut buffer).await?;
-            buffer.trim().to_owned()
-        } else {
-            error!("POSTGRES_PASSWORD environment variable required");
-            panic!() 
-        }
-    };
-
-    let (cb_url, feed_url) = if matches.is_present("sandbox") {
-        (SANDBOX_URL, SANDBOX_FEED_URL)
-    } else {
-        (MAIN_URL, MAIN_FEED_URL)
-    };
-
-    let cb_client = AuthenticatedClient::new(key.clone(), pass.clone(), secret.clone(), cb_url);
-    let cb_client = Arc::new(cb_client);
-    let cb_client1 = Arc::clone(&cb_client);
-    let cb_client2 = Arc::clone(&cb_client);
-
-    let products = cb_client.public().get_products().json();
-    let accounts = cb_client.list_accounts().json();
-    let (products, accounts) = try_join!(products, accounts)?;
-
-    let products = products.as_array().unwrap();
-    let mut products = products.iter().filter(|x| product_id == x["id"].as_str().unwrap());
-    if let Some(_) = products.next() {
-        if !product_id.contains("USD") {
-            error!("Only USD trading pairs allowed. e.g., BTC-USD or LTC-USD ");
-            panic!()
-        }
-    } else {
-        error!("PRODUCT-ID not found");
-        panic!()
-    }
-
-    let accounts = accounts.as_array().unwrap();
-    for account in accounts {
-        if account["currency"].as_str().unwrap() == "USD" {
-            let balance = account["available"].as_str().unwrap().parse::<f64>().unwrap();
-            if position > balance {
-                error!("Not enough funds to take that position");
-                panic!() 
-            }
-        }
-    }
-
-    let connection_string = format!("host=timescaledb user=postgres password={}", password);
+    let connection_string = format!("host=timescaledb user=postgres password=test123");
     let (db_client, connection) =
         tokio_postgres::connect(&connection_string, NoTls).await?;
-    
-    let db_client = Arc::new(db_client);
-    let db_ticker_client = Arc::clone(&db_client);
-    let db_candle_client = Arc::clone(&db_client);
-    let db_ma_client = Arc::clone(&db_client);
-    let db_state_client = Arc::clone(&db_client);
 
-    let (mut ticker_tx, mut ticker_rx) = mpsc::channel(10000);
-    let (mut price_tx, mut price_rx) = mpsc::channel(10000);
-    let (mut rsi_tx, mut rsi_rx) = mpsc::channel(10000);
+    let db_client = std::sync::Arc::new(db_client);
+    let db_client1 = std::sync::Arc::clone(&db_client);
+    let db_client2 = std::sync::Arc::clone(&db_client);
+    let db_client3 = std::sync::Arc::clone(&db_client);
+    let db_client4 = std::sync::Arc::clone(&db_client);
+    let db_client5 = std::sync::Arc::clone(&db_client);
 
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            error!("connection error: {}", e);
+            println!("connection error: {}", e);
         }
     });
 
-    let drop_ticker = db_client.simple_query("DROP TABLE IF EXISTS ticker;");
-    let drop_candle = db_client.simple_query("DROP TABLE IF EXISTS candle;");
-    let drop_ma = db_client.simple_query("DROP TABLE IF EXISTS moving_average;");
-
-    let create_ticker = db_client.simple_query(
-            "CREATE TABLE ticker (
-                trade_id    INT PRIMARY KEY,
-                type        VARCHAR (50) NOT NULL,
-                sequence    INT NOT NULL,
-                time        TIMESTAMP WITH TIME ZONE NOT NULL,
-                product_id  VARCHAR (50) NOT NULL,
-                price       FLOAT NOT NULL,
-                side        VARCHAR (50) NOT NULL,
-                last_size   FLOAT NOT NULL,
-                best_bid    FLOAT NOT NULL,
-                best_ask    FLOAT NOT NULL,
-                high_24h    FLOAT NOT NULL,
-                low_24h     FLOAT NOT NULL,
-                open_24h    FLOAT NOT NULL,
-                volume_24h  FLOAT NOT NULL,
-                volume_30d  FLOAT NOT NULL
-            )"
-        );
-
-    let create_candle = db_client.simple_query(
-            "CREATE TABLE candle (
-                id      SERIAL PRIMARY KEY,
-                time    TIMESTAMP WITH TIME ZONE UNIQUE NOT NULL,
-                open    FLOAT NOT NULL,
-                high    FLOAT NOT NULL,
-                low     FLOAT NOT NULL,
-                close   FLOAT NOT NULL,
-                volume  FLOAT NOT NULL
-            )"
-        );
-
-    let create_ma = db_client.simple_query(
-        "CREATE TABLE moving_average (
+    db_client.simple_query(
+        "CREATE TABLE ma_close (
             id          SERIAL PRIMARY KEY,
             time        TIMESTAMP WITH TIME ZONE NOT NULL,
-            close       FLOAT NOT NULL,
-            sma         FLOAT,
-            ema         FLOAT,
-            gains_ema   FLOAT,
-            losses_ema  FLOAT,
+            close       FLOAT NOT NULL
+        )"
+    ).await?;
+
+    db_client.simple_query(
+        "CREATE TABLE ma_emat (
+            id          SERIAL PRIMARY KEY,
+            time        TIMESTAMP WITH TIME ZONE,
+            emat        FLOAT
+        )"
+    ).await?;
+
+    db_client.simple_query(
+        "CREATE TABLE ma_ematw (
+            id          SERIAL PRIMARY KEY,
+            time        TIMESTAMP WITH TIME ZONE,
+            ematw       FLOAT
+        )"
+    ).await?;
+
+    db_client.simple_query(
+        "CREATE TABLE ma_rsi (
+            id          SERIAL PRIMARY KEY,
+            time        TIMESTAMP WITH TIME ZONE,
             rsi         FLOAT
         )"
-    );
+    ).await?;
 
-    let create_state = db_client.simple_query(
-        "CREATE TABLE IF NOT EXISTS state (
-            id          INT PRIMARY KEY,
-            side        VARCHAR (50) NOT NULL,
-            size        FLOAT,
-            client_oid  UUID
+    db_client.simple_query(
+        "CREATE TABLE ma_macd (
+            id          SERIAL PRIMARY KEY,
+            time        TIMESTAMP WITH TIME ZONE,
+            macd        FLOAT
         )"
-    );
+    ).await?;
 
-    try_join!(
-        drop_ticker,
-        drop_candle,
-        drop_ma,
-        create_ticker,
-        create_candle,
-        create_ma,
-        create_state
-    )?;
+    let statement_close = db_client.prepare(
+        "INSERT INTO ma_close (time, close) VALUES ($1, $2)"
+    ).await.unwrap();
 
-    let ticker_handle = tokio::spawn(async move {
-        let statement = db_ticker_client.prepare(
-            "INSERT INTO ticker (
-                trade_id, type, sequence, 
-                time, product_id, price, 
-                side, last_size, best_bid, 
-                best_ask, high_24h, low_24h, open_24h, volume_24h, volume_30d) 
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)"
-        ).await.unwrap();
+    let statement_ema12 = db_client.prepare(
+        "INSERT INTO ma_emat (time, emat) VALUES ($1, $2)"
+    ).await.unwrap();
 
-        let mut feed = match WebSocketFeed::connect_auth(key, pass, secret, feed_url).await {
-            Ok(feed) => feed,
-            Err(e) => {
-                error!("{:?}", e);
-                return;
-            }
-        };
-        debug!("feed response: {:?}", feed.response());
+    let statement_ema26 = db_client.prepare(
+        "INSERT INTO ma_ematw (time, ematw) VALUES ($1, $2)"
+    ).await.unwrap();
 
-        let product_ids = [&product_id1[..]];
-        if let Err(e) = feed.subscribe(&product_ids[..], &[Channels::TICKER]).await {
-            error!("{:?}", e);
-            return;
-        }
+    let statement = db_client.prepare(
+        "INSERT INTO ma_macd (time, macd) VALUES ($1, $2)"
+    ).await.unwrap();
 
-        while let Some(value) = feed.next().await {
-            match value {
-                Ok(v) => {
-                    let channel_type = v["type"].as_str().unwrap();
+    let statement_rsi = db_client.prepare(
+        "INSERT INTO ma_rsi (time, rsi) VALUES ($1, $2)"
+    ).await.unwrap();
 
-                    if channel_type != Channels::TICKER {
-                        info!("skipping channel: {}", channel_type);
-                        continue
-                    }
+    let (r1, close) = cbbot::candles("BTC-USD", 60).await?;
+    let (r2, mut ema12) = cbbot::ema(close, 12).await?;
 
-                    let price = v["price"].as_str().unwrap().parse::<f64>().unwrap();
-                    let time = DateTime::parse_from_rfc3339(&v["time"].as_str().unwrap()).unwrap();
-                    let last_size = v["last_size"].as_str().unwrap().parse::<f64>().unwrap();
-                    let best_bid = v["best_bid"].as_str().unwrap().parse::<f64>().unwrap();
-                    let best_ask = v["best_ask"].as_str().unwrap().parse::<f64>().unwrap();
-                    let custom_time = time.naive_utc().with_second(0).unwrap().with_nanosecond(0).unwrap();
+    let (r3, close) = cbbot::candles("BTC-USD", 60).await?;
+    let (r4, mut ema26) = cbbot::ema(close, 26).await?;
 
-                    let total_seconds = time.day0() * 86400 + time.hour() * 3600 + time.minute() * 60;
-                    let custom_time = custom_time - Duration::seconds(total_seconds as i64 % granularity);
 
-                    if let Err(_) = ticker_tx.send((custom_time, price, last_size, (best_bid, best_ask))).await {
-                        error!("ticker receiver dropped");
-                        return;
-                    }
-                    
-                    let volume_24h = v["volume_24h"].as_str().unwrap().parse::<f64>().unwrap();
-                    let side = v["side"].as_str().unwrap();
-                    let trade_id = v["trade_id"].as_i64().unwrap() as i32;
-                    let sequence = v["sequence"].as_i64().unwrap() as i32;
-                    let product_id = v["product_id"].as_str().unwrap();
-                    let high_24h = v["high_24h"].as_str().unwrap().parse::<f64>().unwrap();
-                    let low_24h = v["low_24h"].as_str().unwrap().parse::<f64>().unwrap();
-                    let open_24h = v["open_24h"].as_str().unwrap().parse::<f64>().unwrap();
-                    let volume_30d = v["volume_30d"].as_str().unwrap().parse::<f64>().unwrap();
-                    
-                    let params: &[&(dyn ToSql + Sync)] = &[
-                        &trade_id,
-                        &channel_type,
-                        &sequence,
-                        &time,
-                        &product_id,
-                        &price,
-                        &side,
-                        &last_size,
-                        &best_bid,
-                        &best_ask,
-                        &high_24h,
-                        &low_24h,
-                        &open_24h,
-                        &volume_24h,
-                        &volume_30d
-                    ];
+    let (r5, mut rsi) = cbbot::rsi("BTC-USD", 60).await?;
+    let (r6, mut macd) = cbbot::macd("BTC-USD", 60).await?;
+    
+    let (r7, mut close) = cbbot::candles("BTC-USD", 60).await?;
+    tokio::spawn(async move {
+        while let Some((time, .., close, _, _)) = close.next().await {
 
-                    if let Err(e) = db_ticker_client.execute(&statement, params).await {
-                        error!("{:?}", e);
-                        return;
-                    }
-                }
-                Err(e) => {
-                    error!("{:?}", e);
-                    return;
-                }
-            }
-        }
-    });
-
-    let candle_handle = tokio::spawn(async move {
-        let statement = db_candle_client.prepare(
-            "INSERT INTO candle (time, open, high, low, close, volume) 
-            VALUES ($1, $2, $3, $4, $5, $6)"
-        ).await.unwrap();
-
-        let mut bucket: Vec<(f64, f64, NaiveDateTime)> = Vec::new();
-
-        let end = Utc::now() - Duration::seconds(granularity - 30);
-        let start = end - Duration::seconds(300 * granularity);
-        let rates = match cb_client1.public()
-        .get_historic_rates(&product_id2, granularity as i32).range(start, end).json().await {
-            Ok(rates) => rates,
-            Err(e) => {
-                error!("{:?}", e);
-                return;
-            }
-        };
-
-        for rate in rates.as_array().unwrap().iter().rev() {
-            let rate = rate.as_array().unwrap();
-
-            let time = rate[0].as_i64().unwrap();
-            let open = rate[3].as_f64().unwrap();
-            let high = rate[2].as_f64().unwrap();
-            let low = rate[1].as_f64().unwrap();
-            let close = rate[4].as_f64().unwrap();
-            let volume = rate[5].as_f64().unwrap();
-            let time = DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp(time, 0), Utc);
-
-            if (close - open).is_sign_positive() {
-                if let Err(_) = price_tx.send((time, close, "gain", ("old", 0.0, 0.0))).await {
-                    error!("close price receiver dropped");
-                    return;
-                }
-            } else {
-                if let Err(_) = price_tx.send((time, close, "loss", ("old", 0.0, 0.0))).await {
-                    error!("close price receiver dropped");
-                    return;
-                }
-            }
-
-            let params: &[&(dyn ToSql + Sync)] = &[&time, &open, &high, &low, &close, &volume];
-            if let Err(e) = db_candle_client.execute(&statement, params).await {
-                error!("{:?}", e);
+            let params: &[&(dyn ToSql + Sync)] = &[&time, &close];
+            if let Err(e) = db_client1.execute(&statement_close, params).await {
+                print!("{:?}", e);
                 return;
             }    
         }
-
-        let elapsed_time = Duration::seconds(granularity);
-        while let Some((time, price, size, (bid, ask))) = ticker_rx.recv().await {
-            
-            let first_tick = bucket.iter().map(|t| t.2).next();
-            
-            if let Some(first_tick) = first_tick {
-
-                if time - first_tick == elapsed_time {
-                    let open = bucket.iter().map(|t| t.0).next().unwrap_or(0./0.);
-                    let high = bucket.iter().map(|t| t.0).fold(0./0., f64::max);
-                    let low = bucket.iter().map(|t| t.0).fold(0./0., f64::min);
-                    let close = bucket.iter().map(|t| t.0).last().unwrap_or(0./0.);
-                    let volume: f64 = bucket.iter().map(|t| t.1).sum();
-                    
-                    let bucket_time = DateTime::<Utc>::from_utc(first_tick, Utc);
-                    
-                    if (close - open).is_sign_positive() {
-                        if let Err(_) = price_tx.send((bucket_time, close, "gain", ("new", bid, ask))).await {
-                            error!("close price receiver dropped");
-                            return;
-                        }
-                    } else {
-                        if let Err(_) = price_tx.send((bucket_time, close, "loss", ("new", bid, ask))).await {
-                            error!("close price receiver dropped");
-                            return;
-                        }
-                    }
-                    
-                    let params: &[&(dyn ToSql + Sync)] = &[&bucket_time, &open, &high, &low, &close, &volume];
-                    if let Err(_) = db_candle_client.execute(&statement, params).await {
-                        error!("Unable to sync please try again");
-                        return;
-                    }
-                    
-                    (&mut bucket).clear();
-                }
-            }
-            
-            bucket.push((price, size, time));
-        }
-        
     });
 
-    let ma_handle = tokio::spawn(async move {
-        let statement = db_ma_client.prepare(
-            "INSERT INTO moving_average (time, close, sma, ema, gains_ema, losses_ema, rsi) 
-            VALUES ($1, $2, $3, $4, $5, $6, $7)"
-        ).await.unwrap();
+    tokio::spawn(async move {
+        while let Some(ema12) = ema12.next().await {
 
-        let k = 2.0 / ( window_size + 1.0 );
-        let mut count = 0;
-        
-        let mut prev_ema: [Option<f64>; 3] = [None; 3];
-        let mut window: VecDeque<(f64, &str)> = VecDeque::with_capacity(window_size as usize);
-
-        while let Some((time, price, direction, status)) = price_rx.recv().await {
-            info!("previous candle: {:?}", time);
-
-            if count == window_size as usize - 1 {
-                window.push_back((price, direction));
-
-                let sma_all = window.iter().map(|t| t.0).sum::<f64>() / window_size;
-                let sma_gains = window.iter().map(|t| if t.1 == "gain" {t.0} else {0.}).sum::<f64>() / window_size;
-                let sma_losses = window.iter().map(|t| if t.1 == "loss" {t.0} else {0.}).sum::<f64>() / window_size;
-                
-                let mut ema_calc = |index, new_price, sma| {
-                    if let Some(ema) = prev_ema[index] {
-                        let ema = new_price * k + ema * (1.0 - k);
-                        prev_ema[index] = Some(ema);
-                        Some(ema)
-                    } else {
-                        prev_ema[index] = Some(sma);
-                        None
-                    }
-                };
-
-                let ema_all = ema_calc(0, price, sma_all);
-
-                let ema_gains = if let "gain" = direction {
-                   ema_calc(1, price, sma_gains)
-                } else {
-                    ema_calc(1, 0., sma_gains)
-                };
-
-                let ema_losses = if let "loss" = direction {
-                    ema_calc(2, price, sma_losses)
-                 } else {
-                     ema_calc(2, 0., sma_losses)
-                 };
-
-                let rsi = if let (Some(gains), Some(losses)) = (&ema_gains , &ema_losses) {
-                    Some(100.0 - (100.0 / (1.0 + (gains / losses))))
-                } else {
-                    None
-                };
-
-                if let Err(_) = rsi_tx.send((rsi, status)).await {
-                    error!("rsi receiver dropped");
+            if let Some((time, ema12)) = ema12 {
+                let params: &[&(dyn ToSql + Sync)] = &[&time, &ema12];
+                if let Err(e) = db_client2.execute(&statement_ema12, params).await {
+                    print!("{:?}", e);
                     return;
-                }
-
-                let params: &[&(dyn ToSql + Sync)] = &[
-                    &time, 
-                    &price, 
-                    &sma_all, 
-                    &ema_all, 
-                    &ema_gains, 
-                    &ema_losses, 
-                    &rsi
-                ];
-            
-                if let Err(e) = db_ma_client.execute(&statement, params).await {
-                    error!("{:?}", e);
-                    return;
-                }
-                
-                window.pop_front();
+                }   
             } else {
-                window.push_back((price, direction));
-                count += 1;
-
-                let params: &[&(dyn ToSql + Sync)] = &[
-                    &time, 
-                    &price, 
-                    &None::<f64>, 
-                    &None::<f64>, 
-                    &None::<f64>, 
-                    &None::<f64>, 
-                    &None::<f64>
-                ];
-
-                if let Err(e) = db_ma_client.execute(&statement, params).await {
-                    error!("{:?}", e);
+                let params: &[&(dyn ToSql + Sync)] = &[&None::<DateTime<Utc>>, &None::<f64>];
+                if let Err(e) = db_client2.execute(&statement_ema12, params).await {
+                    print!("{:?}", e);
                     return;
-                }
-            } 
-        }
-
-    });
-
-    // trading starts here
-    let trade_handle = tokio::spawn(async move {
-        let init_statement = db_state_client.prepare(
-            "INSERT INTO state (id, side, size, client_oid) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING"
-        ).await.unwrap();
-
-        let statement = db_state_client.prepare(
-            "SELECT * FROM state"
-        ).await.unwrap();
-
-        let update_statement = db_state_client.prepare(
-            "UPDATE state SET side = $1, size = $2, client_oid = $3 WHERE id = 1"
-        ).await.unwrap();
-
-        let id: i32 = 1;
-        let init_side: &'static str = "sell";
-
-        let params: &[&(dyn ToSql + Sync)] = &[&id, &init_side, &None::<f64>, &None::<Uuid>];
-        if let Err(e) = db_state_client.execute(&init_statement, params).await {
-            error!("{:?}", e);
-            return;
-        }
-
-        while let Some(status) = rsi_rx.recv().await {
-            if let (Some(rsi), ("new", bid, ask)) = status {
-
-                let (side, size, uuid): (String, Option<f64>, Option<Uuid>) = match db_state_client.query_one(&statement, &[]).await {
-                    Ok(row) => (row.get("side"), row.get("size"), row.get("client_oid")),
-                    Err(e) =>  {
-                        error!("{:?}", e);
-                        return;
-                    }
-                };
-
-                let (side, size) = if let (side, size, Some(uuid)) =  (side, size, uuid) {
-                    let client_oid = &uuid.to_hyphenated().to_string();
-                    let order = cb_client2
-                        .get_order(ORD::ClientOID(client_oid))
-                        .json()
-                        .await;
-    
-                    match order {
-                        Ok(ref ord) => {
-                            let status = ord["status"].as_str().unwrap();
-                            let settled = ord["settled"].as_bool().unwrap();
-
-                            if let ("done", true) = (status, settled) {
-                                let side = String::from(ord["side"].as_str().unwrap());
-                                let size = ord["size"].as_str()
-                                    .unwrap()
-                                    .parse::<f64>()
-                                    .unwrap();
-
-                                (side, Some(size))
-                            } else {
-                                continue
-                            }
-                        },
-                        Err(_) => {
-                            warn!("Limit {} order cancelled, client_oid: {}", side, client_oid);
-                            if side == "sell" {
-                                info!("Reversing to buy");
-                                (String::from("buy"), size)
-                            } else {
-                                info!("Reversing to sell", );
-                                (String::from("sell"), None)
-                            }
-                        }
-                    }
- 
-                } else {
-                    (String::from(init_side), None)
-                };
-
-                if rsi <= rsi_buy && side == "sell" {
-                    let size = position / ask;
-                    let dp = 10.0_f64.powi(8);
-                    let size = (size * dp).round() / dp;
-                    let uuid = Uuid::new_v4();
-                    let client_oid = uuid.to_hyphenated().to_string();
-                    let side: &'static str = "buy";
-
-                    let response = cb_client2
-                        .place_limit_order(&product_id3, side, ask, size)
-                        .client_oid(&client_oid)
-                        .time_in_force("FOK")
-                        .json()
-                        .await;
-
-                    info!("buy limit order, client_oid: {}, price: {}, size: {}, rsi: {}", client_oid, ask, size, rsi);
-                    if let Err(e) = response {
-                        error!("{:?}", e);
-                        return;
-                    }
-                    
-                    if let Err(e) = db_state_client.execute(&update_statement, &[&side, &size, &uuid]).await {
-                        error!("{:?}", e);
-                        return;
-                    }
-
-                } else if rsi >= rsi_sell && side == "buy" {
-                    let uuid = Uuid::new_v4();
-                    let client_oid = uuid.to_hyphenated().to_string();
-                    let side: &'static str = "sell";
-                    
-                    let size = if let Some(size) = size {
-                        size
-                    } else {
-                        error!("world is ending");
-                        return
-                    };
-
-                    let response = cb_client2
-                        .place_limit_order(&product_id3, side, bid, size)
-                        .client_oid(&client_oid)
-                        .time_in_force("FOK")
-                        .json()
-                        .await;
-
-                    info!("sell limit order, client_oid: {}, price: {}, size: {}, rsi: {}", client_oid, bid, size, rsi);
-                    if let Err(e) = response {
-                        error!("{:?}", e);
-                        return;
-                    }
-
-                    if let Err(e) = db_state_client.execute(&update_statement, &[&side, &size, &uuid]).await {
-                        error!("{:?}", e);
-                        return;
-                    }
-                };
+                }   
             }
         }
     });
 
-    if let Err(e) = try_join!(ticker_handle, candle_handle, ma_handle, trade_handle) {
-        error!("{:?}", e);
-        panic!()
-    }
+    tokio::spawn(async move {
+        while let Some(ema26) = ema26.next().await {
 
+            if let Some((time, ema26)) = ema26 {
+                let params: &[&(dyn ToSql + Sync)] = &[&time, &ema26];
+                if let Err(e) = db_client3.execute(&statement_ema26, params).await {
+                    print!("{:?}", e);
+                    return;
+                } 
+            } else {
+                let params: &[&(dyn ToSql + Sync)] = &[&None::<DateTime<Utc>>, &None::<f64>];
+                if let Err(e) = db_client3.execute(&statement_ema26, params).await {
+                    print!("{:?}", e);
+                    return;
+                } 
+            }
+        }
+    });
+
+    tokio::spawn(async move {
+        while let Some(macd) = macd.next().await {
+
+            if let Some((time, macd)) = macd {
+                let params: &[&(dyn ToSql + Sync)] = &[&time, &macd];
+                if let Err(e) = db_client4.execute(&statement, params).await {
+                    print!("{:?}", e);
+                    return;
+                }    
+            } else {
+                let params: &[&(dyn ToSql + Sync)] = &[&None::<DateTime<Utc>>, &None::<f64>];
+                if let Err(e) = db_client4.execute(&statement, params).await {
+                    print!("{:?}", e);
+                    return;
+                }    
+            }
+        }
+    });
+
+    tokio::spawn(async move {
+        while let Some(rsi) = rsi.next().await {
+
+            if let Some((time, rsi)) = rsi {
+                let params: &[&(dyn ToSql + Sync)] = &[&time, &rsi];
+                if let Err(e) = db_client5.execute(&statement_rsi, params).await {
+                    print!("{:?}", e);
+                    return;
+                }    
+            } else {
+                let params: &[&(dyn ToSql + Sync)] = &[&None::<DateTime<Utc>>, &None::<f64>];
+                if let Err(e) = db_client5.execute(&statement_rsi, params).await {
+                    print!("{:?}", e);
+                    return;
+                }    
+            }
+        }
+    });
+
+    try_join!(r1, r2, r3, r4, r5, r6, r7)?;
+
+    //println!("{}", serde_json::to_string_pretty(&value).unwrap());
     Ok(())
 }
