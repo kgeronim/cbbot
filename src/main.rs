@@ -18,19 +18,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut buy_state = State {prev_macd: None, confirm_count: 0};
     let mut sell_state = State {prev_macd: None, confirm_count: 0};
-    
-    let accounts = client
-        .list_accounts()
-        .json()
-        .await?;
  
-    println!("{}", serde_json::to_string_pretty(&accounts).unwrap());
     
     while let (Some(rsi), Some(macd)) = join!(rsi.next(), macd.next()) {
-        if let (Some((time, rsi, ("new", _, _))), Some((_, macd, _))) = (rsi, macd) {
+        if let (Some((time, rsi, ("new", bid, ask))), Some((_, macd, _))) = (rsi, macd) {
 
             let holds = client
-                .get_holds("<account_id>")
+                .list_orders(&["open", "pending", "active"])
                 .json()
                 .await?;
 
@@ -60,7 +54,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 if buy_state.confirm_count > 1 {
-                    info!("Buy at, time:{}, rsi: {}, macd: {}, confirm: {}", time, rsi, macd, buy_state.confirm_count);
+                    let size = 25.0 / ask;
+                    let dp = 10.0_f64.powi(8);
+                    let size = (size * dp).round() / dp;
+                    
+                    let response = client
+                        .place_limit_order("BTC-USD", "buy", ask, size)
+                        .time_in_force("FOK")
+                        .json()
+                        .await?;
+                    
+                    info!("Buy, time:{}, rsi: {}, macd: {}, confirm: {}", time, rsi, macd, buy_state.confirm_count);
+                    info!("{}", serde_json::to_string_pretty(&response).unwrap());
                     buy_state.confirm_count = 0;
                     buy_state.prev_macd = None;
                 }
@@ -82,7 +87,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 if sell_state.confirm_count > 1 {
-                    info!("Sell at, time:{}, rsi: {}, macd: {}, confirm: {}", time, rsi, macd, sell_state.confirm_count);
+                    
+                    let size = fills[0]["size"].as_str().unwrap().parse::<f64>()?;
+                    let response = client
+                        .place_limit_order("BTC-USD", "sell", bid, size)
+                        .time_in_force("FOK")
+                        .json()
+                        .await?;
+                    
+                    info!("Sell, time:{}, rsi: {}, macd: {}, confirm: {}", time, rsi, macd, sell_state.confirm_count);
+                    info!("{}", serde_json::to_string_pretty(&response).unwrap());
                     sell_state.confirm_count = 0;
                     sell_state.prev_macd = None;
                 }
