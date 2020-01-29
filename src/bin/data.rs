@@ -12,7 +12,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let connection_string = format!("host=timescaledb user=postgres password=test123");
     let (db_client, connection) =
         tokio_postgres::connect(&connection_string, NoTls).await?;
-
+    //s
     let db_client = std::sync::Arc::new(db_client);
     let db_client1 = std::sync::Arc::clone(&db_client);
     let db_client2 = std::sync::Arc::clone(&db_client);
