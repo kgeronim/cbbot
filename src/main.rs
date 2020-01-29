@@ -132,7 +132,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let side = &fills[0]["side"];
                 
                 // Buy signals happen here
-                if rsi < 30.0 && side == "sell" {
+                if rsi < rsi_buy && side == "sell" {
                     if let None = buy_state.prev_macd {
                         buy_state.prev_macd = Some(macd);
                         info!("rsi buy signal, time: {}, rsi: {}", time, rsi)
@@ -169,7 +169,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 // Sell signals happen here
-                if rsi > 70.0 && side == "buy" {
+                if rsi > rsi_sell && side == "buy" {
                     if let None = sell_state.prev_macd {
                         sell_state.prev_macd = Some(macd);
                         info!("rsi sell signal, time: {}, rsi: {}", time, rsi)
