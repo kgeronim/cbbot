@@ -79,7 +79,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         (MAIN_URL, Source::Main)
     };
 
-
     let client = AuthenticatedClient::new(key, pass, secret, cb_url);
 
     let products = client.public().get_products().json();
@@ -143,7 +142,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(pm) = buy_state.prev_macd {
                     if macd > pm {
                         buy_state.confirm_count += 1;
-                        info!("macd buy signal, time: {}, macd: {}, prev_macd: {:?}, confirm: {}", time, macd, buy_state.prev_macd, buy_state.confirm_count);
+                        info!("macd buy signal, time: {}, macd: {}, prev_macd: {}, confirm_count: {}", time, macd, pm, buy_state.confirm_count);
                     }
                     buy_state.prev_macd = Some(macd);
                 }
@@ -180,7 +179,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(pm) = sell_state.prev_macd {
                     if macd < pm {
                         sell_state.confirm_count += 1;
-                        info!("macd sell signal, time: {}, macd: {}, prev_macd: {:?}, confirm: {}", time, macd, sell_state.prev_macd, sell_state.confirm_count);
+                        info!("macd sell signal, time: {}, macd: {}, prev_macd: {}, confirm_count: {}", time, macd, pm, sell_state.confirm_count);
                     }
                     sell_state.prev_macd = Some(macd);
                 }
