@@ -3,9 +3,11 @@ use tokio_postgres::{types::ToSql, NoTls};
 use futures::try_join;
 use chrono::{DateTime, Utc};
 use cbbot::Source::Main;
+use log::{warn, Level};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    simple_logger::init_with_level(Level::Debug).unwrap();
 
     let connection_string = format!("host=timescaledb user=postgres password=test123");
     let (db_client, connection) =
@@ -106,7 +108,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let params: &[&(dyn ToSql + Sync)] = &[&time, &close];
             if let Err(e) = db_client1.execute(&statement_close, params).await {
-                print!("{:?}", e);
+                warn!("{:?}", e);
                 return;
             }    
         }
@@ -118,13 +120,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some((time, ema12, _)) = ema12 {
                 let params: &[&(dyn ToSql + Sync)] = &[&time, &ema12];
                 if let Err(e) = db_client2.execute(&statement_ema12, params).await {
-                    print!("{:?}", e);
+                    warn!("{:?}", e);
                     return;
                 }   
             } else {
                 let params: &[&(dyn ToSql + Sync)] = &[&None::<DateTime<Utc>>, &None::<f64>];
                 if let Err(e) = db_client2.execute(&statement_ema12, params).await {
-                    print!("{:?}", e);
+                    warn!("{:?}", e);
                     return;
                 }   
             }
@@ -137,13 +139,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some((time, ema26, _)) = ema26 {
                 let params: &[&(dyn ToSql + Sync)] = &[&time, &ema26];
                 if let Err(e) = db_client3.execute(&statement_ema26, params).await {
-                    print!("{:?}", e);
+                    warn!("{:?}", e);
                     return;
                 } 
             } else {
                 let params: &[&(dyn ToSql + Sync)] = &[&None::<DateTime<Utc>>, &None::<f64>];
                 if let Err(e) = db_client3.execute(&statement_ema26, params).await {
-                    print!("{:?}", e);
+                    warn!("{:?}", e);
                     return;
                 } 
             }
@@ -156,13 +158,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some((time, macd, _)) = macd {
                 let params: &[&(dyn ToSql + Sync)] = &[&time, &macd];
                 if let Err(e) = db_client4.execute(&statement, params).await {
-                    print!("{:?}", e);
+                    warn!("{:?}", e);
                     return;
                 }    
             } else {
                 let params: &[&(dyn ToSql + Sync)] = &[&None::<DateTime<Utc>>, &None::<f64>];
                 if let Err(e) = db_client4.execute(&statement, params).await {
-                    print!("{:?}", e);
+                    warn!("{:?}", e);
                     return;
                 }    
             }
@@ -175,13 +177,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some((time, rsi, _)) = rsi {
                 let params: &[&(dyn ToSql + Sync)] = &[&time, &rsi];
                 if let Err(e) = db_client5.execute(&statement_rsi, params).await {
-                    print!("{:?}", e);
+                    warn!("{:?}", e);
                     return;
                 }    
             } else {
                 let params: &[&(dyn ToSql + Sync)] = &[&None::<DateTime<Utc>>, &None::<f64>];
                 if let Err(e) = db_client5.execute(&statement_rsi, params).await {
-                    print!("{:?}", e);
+                    warn!("{:?}", e);
                     return;
                 }    
             }

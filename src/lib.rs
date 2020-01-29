@@ -2,10 +2,12 @@ use cbpro::{
     client::{PublicClient, MAIN_URL, SANDBOX_URL},
     websocket::{Channels, WebSocketFeed, MAIN_FEED_URL, SANDBOX_FEED_URL}
 };
+use log::{error, debug};
 use chrono::{DateTime, NaiveDateTime, Duration, Utc};
 use tokio::{sync::mpsc, task::JoinHandle};
 use futures::{stream::{self, Stream, StreamExt}, join};
 use std::collections::VecDeque;
+use std::error::Error;
 
 pub type Candle = (DateTime<Utc>, f64, f64, f64, f64, f64, (&'static str, f64, f64));
 
@@ -47,7 +49,7 @@ pub async fn candles(product_id: &str, granularity: i64, source: Source) -> cbpr
     let rates = stream::iter(rates);
 
     let mut feed = WebSocketFeed::connect(feed_url).await?;
-    feed.subscribe(&[product_id], &[Channels::TICKER]).await?;
+    feed.subscribe(&[product_id], &[Channels::TICKER, Channels::HEARTBEAT]).await?;
 
     let (mut tx, rx) = mpsc::channel(100);
 
@@ -58,7 +60,10 @@ pub async fn candles(product_id: &str, granularity: i64, source: Source) -> cbpr
         while let Some(result) = feed.next().await {
             match result {
                 Ok(value) => {
-                    //println!("{}", serde_json::to_string_pretty(&value).unwrap());
+                    if value["type"] == Channels::HEARTBEAT {
+                        debug!("{}", serde_json::to_string_pretty(&value).unwrap());
+                    }
+
                     if value["type"] == Channels::TICKER {
                         let time = value["time"].as_str().unwrap();
                         let time = DateTime::parse_from_rfc3339(time).unwrap().timestamp();
@@ -95,7 +100,7 @@ pub async fn candles(product_id: &str, granularity: i64, source: Source) -> cbpr
                     }
                 },
                 Err(e) => {
-                    println!("{:?}", e);
+                    error!("Candle Error: {:?}", e.source());
                     return
                 }
             }
@@ -130,7 +135,7 @@ where
                     prev_ema = Some(ema);
 
                     if let Err(_) = tx.send(Some((time, ema, direction))).await {
-                        println!("receiver dropped");
+                        error!("receiver dropped");
                         return;
                     }
                 } else {
@@ -143,7 +148,7 @@ where
                 count += 1;
 
                 if let Err(_) = tx.send(None).await {
-                    println!("receiver dropped");
+                    error!("receiver dropped");
                     return;
                 }
             }
@@ -173,12 +178,12 @@ pub async fn rsi(product_id: &str, granularity: i64, source: Source) -> cbpro::e
             if let (Some((_, gains, direction)), Some((time, losses, _))) = (gains, losses) {
                 let rsi = 100.0 - (100.0 / (1.0 + (gains / losses)));
                 if let Err(_) = tx.send(Some((time, rsi, direction))).await {
-                    println!("receiver dropped");
+                    error!("receiver dropped");
                     return;
                 }
             } else {
                 if let Err(_) = tx.send(None).await {
-                    println!("receiver dropped");
+                    error!("receiver dropped");
                     return;
                 }
             }
@@ -206,12 +211,12 @@ pub async fn macd(product_id: &str, granularity: i64, source: Source) -> cbpro::
             if let (Some((_, ema12, _)), Some((time, ema26, direction))) = (ema12, ema26) {
                 let macd = ema12 - ema26;
                 if let Err(_) = tx.send(Some((time, macd, direction))).await {
-                    println!("receiver dropped");
+                    error!("receiver dropped");
                     return;
                 }
             } else {
                 if let Err(_) = tx.send(None).await {
-                    println!("receiver dropped");
+                    error!("receiver dropped");
                     return;
                 } 
             }
