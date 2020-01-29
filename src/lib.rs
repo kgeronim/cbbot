@@ -6,15 +6,32 @@ use log::{error, debug};
 use chrono::{DateTime, NaiveDateTime, Duration, Utc};
 use tokio::{sync::mpsc, task::JoinHandle};
 use futures::{stream::{self, Stream, StreamExt}, join};
-use std::collections::VecDeque;
-use std::error::Error;
+use std::{collections::VecDeque, error::Error};
 
 pub type Candle = (DateTime<Utc>, f64, f64, f64, f64, f64, (&'static str, f64, f64));
+type Indicator = Option<(DateTime<Utc>, f64, (&'static str, f64, f64))>;
+
+pub struct State {
+    pub prev_macd: Option<f64>,
+    pub confirm_count: usize
+}
 
 #[derive(Copy, Clone)]
 pub enum Source {
     Main,
     Sandbox
+}
+
+pub fn validator(x: String) -> Result<(), String> {
+    if let Ok(x) = x.parse::<u32>() {
+        if x <= 100 {
+            Ok(())
+        } else {
+            Err(String::from("value has to be between 0-100"))
+        }
+    } else {
+        Err(String::from("value has to be between 0-100"))
+    }
 }
 
 pub async fn candles(product_id: &str, granularity: i64, source: Source) -> cbpro::error::Result<(JoinHandle<()>, impl Stream<Item=Candle> + Unpin + Send + 'static)> {
@@ -25,7 +42,7 @@ pub async fn candles(product_id: &str, granularity: i64, source: Source) -> cbpr
     };
 
     let client = PublicClient::new(cb_url);
-    let end = Utc::now(); // - Duration::seconds(60);
+    let end = Utc::now();
     let start = end - Duration::seconds(300 * granularity);
     
     let rates = client
@@ -84,7 +101,7 @@ pub async fn candles(product_id: &str, granularity: i64, source: Source) -> cbpr
                                 let start = DateTime::<Utc>::from_utc(start, Utc);
 
                                 if let Err(_) = tx.send((start, open, high, low, close, volume, ("new", best_bid, best_ask))).await {
-                                    println!("receiver dropped");
+                                    println!("candle receiver dropped");
                                     return;
                                 }
 
@@ -100,7 +117,7 @@ pub async fn candles(product_id: &str, granularity: i64, source: Source) -> cbpr
                     }
                 },
                 Err(e) => {
-                    error!("Candle Error: {:?}", e.source());
+                    error!("candle sender error: {:?}", e.source().unwrap());
                     return
                 }
             }
@@ -111,8 +128,7 @@ pub async fn candles(product_id: &str, granularity: i64, source: Source) -> cbpr
     Ok((handle, rates))
 }
 
-type Ema = Option<(DateTime<Utc>, f64, (&'static str, f64, f64))>;
-pub async fn ema<T>(mut candles: T, window_size: usize) -> cbpro::error::Result<(JoinHandle<()>, impl Stream<Item=Ema> + Unpin + Send + 'static)>
+pub async fn ema<T>(mut candles: T, window_size: usize) -> cbpro::error::Result<(JoinHandle<()>, impl Stream<Item=Indicator> + Unpin + Send + 'static)>
 where 
     T: Stream<Item=Candle> + Unpin + Send + 'static,
 {
@@ -135,7 +151,7 @@ where
                     prev_ema = Some(ema);
 
                     if let Err(_) = tx.send(Some((time, ema, direction))).await {
-                        error!("receiver dropped");
+                        error!("ema receiver dropped");
                         return;
                     }
                 } else {
@@ -148,7 +164,7 @@ where
                 count += 1;
 
                 if let Err(_) = tx.send(None).await {
-                    error!("receiver dropped");
+                    error!("ema receiver dropped");
                     return;
                 }
             }
@@ -158,8 +174,7 @@ where
     Ok((handle, rx))
 }
 
-type Rsi = Option<(DateTime<Utc>, f64, (&'static str, f64, f64))>;
-pub async fn rsi(product_id: &str, granularity: i64, source: Source) -> cbpro::error::Result<(JoinHandle<()>, impl Stream<Item=Rsi> + Unpin + Send + 'static)> {
+pub async fn rsi(product_id: &str, granularity: i64, source: Source) -> cbpro::error::Result<(JoinHandle<()>, impl Stream<Item=Indicator> + Unpin + Send + 'static)> {
     let (mut tx, rx) = mpsc::channel(100);
 
     let size: usize = 14;
@@ -178,12 +193,12 @@ pub async fn rsi(product_id: &str, granularity: i64, source: Source) -> cbpro::e
             if let (Some((_, gains, direction)), Some((time, losses, _))) = (gains, losses) {
                 let rsi = 100.0 - (100.0 / (1.0 + (gains / losses)));
                 if let Err(_) = tx.send(Some((time, rsi, direction))).await {
-                    error!("receiver dropped");
+                    error!("rsi receiver dropped");
                     return;
                 }
             } else {
                 if let Err(_) = tx.send(None).await {
-                    error!("receiver dropped");
+                    error!("rsi receiver dropped");
                     return;
                 }
             }
@@ -194,8 +209,7 @@ pub async fn rsi(product_id: &str, granularity: i64, source: Source) -> cbpro::e
     Ok((handle, rx))
 }
 
-type Macd = Option<(DateTime<Utc>, f64, (&'static str, f64, f64))>;
-pub async fn macd(product_id: &str, granularity: i64, source: Source) -> cbpro::error::Result<(JoinHandle<()>, impl Stream<Item=Macd> + Unpin + Send + 'static)> {
+pub async fn macd(product_id: &str, granularity: i64, source: Source) -> cbpro::error::Result<(JoinHandle<()>, impl Stream<Item=Indicator> + Unpin + Send + 'static)> {
     let (mut tx, rx) = mpsc::channel(100);
 
     let (_, ema12) = candles(product_id, granularity, source).await?;
@@ -211,12 +225,12 @@ pub async fn macd(product_id: &str, granularity: i64, source: Source) -> cbpro::
             if let (Some((_, ema12, _)), Some((time, ema26, direction))) = (ema12, ema26) {
                 let macd = ema12 - ema26;
                 if let Err(_) = tx.send(Some((time, macd, direction))).await {
-                    error!("receiver dropped");
+                    error!("macd receiver dropped");
                     return;
                 }
             } else {
                 if let Err(_) = tx.send(None).await {
-                    error!("receiver dropped");
+                    error!("macd receiver dropped");
                     return;
                 } 
             }
