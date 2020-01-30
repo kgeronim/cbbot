@@ -117,6 +117,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     while let (Some(rsi), Some(macd)) = join!(rsi.next(), macd.next()) {
         if let (Some((time, rsi, ("new", bid, ask))), Some((_, macd, _))) = (rsi, macd) {
+            info!("candle_time: {}, bid: {}, ask: {}, rsi: {}, macd: {}", time, bid, ask, rsi, macd);
 
             let holds = client
                 .list_orders(&["open", "pending", "active"])

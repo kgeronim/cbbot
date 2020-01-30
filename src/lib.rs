@@ -2,7 +2,7 @@ use cbpro::{
     client::{PublicClient, MAIN_URL, SANDBOX_URL},
     websocket::{Channels, WebSocketFeed, MAIN_FEED_URL, SANDBOX_FEED_URL}
 };
-use log::{error, info};
+use log::error;
 use chrono::{DateTime, NaiveDateTime, Duration, Utc};
 use tokio::{sync::mpsc, task::JoinHandle};
 use futures::{stream::{self, Stream, StreamExt}, join};
@@ -99,7 +99,6 @@ pub async fn candles(product_id: &str, granularity: i64, source: Source) -> cbpr
                                 let close = buffer.iter().map(|x| x.0).last().unwrap();
                                 let volume = buffer.iter().map(|x| x.1).sum::<f64>().round();
 
-                                info!("time: {}, open: {}, high: {}, low: {}, close: {}, volume: {}", time, open, high, low, close, volume);
                                 let start = NaiveDateTime::from_timestamp((start / granularity) * granularity, 0);
                                 let start = DateTime::<Utc>::from_utc(start, Utc);
 
