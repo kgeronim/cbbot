@@ -3,6 +3,7 @@ use cbbot::Source;
 use futures::{stream::StreamExt, join, try_join};
 use cbpro::client::{AuthenticatedClient, MAIN_URL, SANDBOX_URL, FILL};
 use clap::{Arg, App};
+use rust_decimal::Decimal;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -49,8 +50,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let granularity = matches.value_of("granularity").map_or(60, |x| x.parse::<i64>().unwrap());
     let position = matches.value_of("POSITION").map(|x| x.parse::<f64>().unwrap()).unwrap();
-    let rsi_buy = matches.value_of("RSI-BUY").map(|x| x.parse::<f64>().unwrap()).unwrap();
-    let rsi_sell = matches.value_of("RSI-SELL").map(|x| x.parse::<f64>().unwrap()).unwrap();
+    let rsi_buy = matches.value_of("RSI-BUY").map(|x| x.parse::<Decimal>().unwrap()).unwrap();
+    let rsi_sell = matches.value_of("RSI-SELL").map(|x| x.parse::<Decimal>().unwrap()).unwrap();
     let product_id = String::from(matches.value_of("PRODUCT-ID").unwrap());
 
     if rsi_buy >= rsi_sell {
