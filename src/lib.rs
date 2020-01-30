@@ -2,7 +2,7 @@ use cbpro::{
     client::{PublicClient, MAIN_URL, SANDBOX_URL},
     websocket::{Channels, WebSocketFeed, MAIN_FEED_URL, SANDBOX_FEED_URL}
 };
-use log::{error, debug};
+use log::{error, info};
 use chrono::{DateTime, NaiveDateTime, Duration, Utc};
 use tokio::{sync::mpsc, task::JoinHandle};
 use futures::{stream::{self, Stream, StreamExt}, join};
@@ -72,7 +72,7 @@ pub async fn candles(product_id: &str, granularity: i64, source: Source) -> cbpr
     let rates = stream::iter(rates);
 
     let mut feed = WebSocketFeed::connect(feed_url).await?;
-    feed.subscribe(&[product_id], &[Channels::TICKER, Channels::HEARTBEAT]).await?;
+    feed.subscribe(&[product_id], &[Channels::TICKER]).await?;
 
     let (mut tx, rx) = mpsc::channel(100);
 
@@ -83,10 +83,6 @@ pub async fn candles(product_id: &str, granularity: i64, source: Source) -> cbpr
         while let Some(result) = feed.next().await {
             match result {
                 Ok(value) => {
-                    if value["type"] == Channels::HEARTBEAT {
-                        debug!("{}", serde_json::to_string_pretty(&value).unwrap());
-                    }
-
                     if value["type"] == Channels::TICKER {
                         let time = value["time"].as_str().unwrap();
                         let time = DateTime::parse_from_rfc3339(time).unwrap().timestamp();
@@ -103,6 +99,7 @@ pub async fn candles(product_id: &str, granularity: i64, source: Source) -> cbpr
                                 let close = buffer.iter().map(|x| x.0).last().unwrap();
                                 let volume = buffer.iter().map(|x| x.1).sum::<f64>().round();
 
+                                info!("time: {}, open: {}, high: {}, low: {}, close: {}, volume: {}", time, open, high, low, close, volume);
                                 let start = NaiveDateTime::from_timestamp((start / granularity) * granularity, 0);
                                 let start = DateTime::<Utc>::from_utc(start, Utc);
 
