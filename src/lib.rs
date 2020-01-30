@@ -2,7 +2,7 @@ use cbpro::{
     client::{PublicClient, MAIN_URL, SANDBOX_URL},
     websocket::{Channels, WebSocketFeed, MAIN_FEED_URL, SANDBOX_FEED_URL}
 };
-use log::{error, info};
+use log::{error, debug};
 use chrono::{DateTime, NaiveDateTime, Duration, Utc};
 use tokio::{sync::mpsc, task::JoinHandle};
 use futures::{stream::{self, Stream, StreamExt}, join};
@@ -84,7 +84,7 @@ pub async fn candles(product_id: &str, granularity: i64, source: Source) -> cbpr
             match result {
                 Ok(value) => {
                     if value["type"] == Channels::HEARTBEAT {
-                        info!("{}", serde_json::to_string_pretty(&value).unwrap());
+                        debug!("{}", serde_json::to_string_pretty(&value).unwrap());
                     }
 
                     if value["type"] == Channels::TICKER {
